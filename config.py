@@ -1,0 +1,151 @@
+"""
+Deriv Synthetic-Indices Trading Bot — Configuration
+All tunable parameters in one place.
+"""
+
+from dataclasses import dataclass, field
+from typing import List
+
+
+@dataclass
+class DigitConfig:
+    """Digit-distribution analysis parameters."""
+    window_size: int = 50              # ticks to track digit distribution
+    even_odd_threshold: float = 0.55   # min P(even) or P(odd) to trigger signal
+    chi_sq_alpha: float = 0.05         # significance level for chi-square test
+    cusum_drift: float = 0.02          # CUSUM drift parameter for change-point detection
+    cusum_threshold: float = 1.0       # CUSUM alarm threshold
+
+
+@dataclass
+class VolatilityConfig:
+    """Volatility estimation parameters."""
+    atr_period: int = 14
+    rolling_std_window: int = 30
+    realized_vol_window: int = 50
+    low_vol_percentile: float = 30.0   # ATR below this percentile → low-vol regime
+    high_vol_percentile: float = 70.0  # ATR above this percentile → high-vol regime
+
+
+@dataclass
+class HMMConfig:
+    """Hidden Markov Model regime detection."""
+    n_regimes: int = 3                 # trending, mean-reverting, choppy
+    lookback: int = 200                # ticks to fit the HMM
+    retrain_interval: int = 200        # retrain every N ticks (increased for performance)
+
+
+@dataclass
+class EnsembleConfig:
+    """Ensemble signal scoring weights (logistic combination)."""
+    weight_digit_bias: float = 0.35
+    weight_chi_sq: float = 0.20
+    weight_entropy: float = 0.15
+    weight_momentum: float = 0.15
+    weight_regime: float = 0.15
+    entry_score_threshold: float = 0.65  # raised from 0.60 — only trade strong signals
+    require_known_regime: bool = False
+
+
+@dataclass
+class KellyConfig:
+    """Kelly Criterion adaptive stake sizing."""
+    enabled: bool = True
+    lookback_trades: int = 30          # trades to estimate win-rate / payout
+    kelly_fraction: float = 0.5        # half-Kelly for safety
+    min_trades_for_kelly: int = 15     # need at least this many trades before using Kelly
+
+
+@dataclass
+class MartingaleConfig:
+    """Controlled Martingale money management."""
+    multiplier: float = 1.8              # reduced from 2.0 — slower escalation
+    max_consecutive_losses: int = 5       # increased from 4 — gives Martingale more room
+    max_stake_usd: float = 50.0
+    base_stake_usd: float = 1.0
+    profit_target_usd: float = 100.0   # stop bot after this net profit
+    loss_limit_usd: float = -100.0     # stop bot after this net loss
+    bankroll_fraction: float = 0.02    # max base stake as fraction of equity
+
+
+@dataclass
+class CircuitBreakerConfig:
+    """Drawdown-responsive circuit breakers."""
+    equity_ma_window: int = 20         # moving average window of equity curve
+    drawdown_pct_trigger: float = 0.10 # if equity drops 10% below MA, activate
+    cooldown_ticks: int = 50           # ticks to wait when circuit breaker fires
+    reduced_stake_fraction: float = 0.5 # reduce stake to this fraction during cooldown
+
+
+@dataclass
+class TimeFilterConfig:
+    """Time-of-day / session pattern filters."""
+    enabled: bool = False               # disabled by default until enough data
+    weak_hours_utc: List[int] = field(default_factory=lambda: [3, 4, 5])  # hours to avoid
+    min_sample_per_hour: int = 50       # trades per hour before we trust the filter
+
+
+@dataclass
+class ShadowConfig:
+    """Paper-trading shadow mode for A/B testing."""
+    enabled: bool = False
+    min_shadow_trades: int = 50         # trades before promoting shadow params
+
+
+@dataclass
+class AlphaBloomConfig:
+    """AlphaBloom digit-frequency strategy parameters."""
+    window_size: int = 60              # ticks to analyse
+    imbalance_threshold: float = 0.55  # min P(even) or P(odd) to trigger
+    cooldown_ticks: int = 3            # ticks to wait after a trade
+    streak_confirm: int = 3            # consecutive ticks dominant side must lead
+
+
+@dataclass
+class IndexConfig:
+    """Multi-index selection."""
+    symbols: List[str] = field(default_factory=lambda: [
+        "R_10", "R_25", "R_50", "R_75", "R_100",
+        "1HZ10V", "1HZ25V", "1HZ50V", "1HZ75V", "1HZ100V",
+    ])
+    correlation_penalty: float = 0.3    # penalise correlated indices
+    min_score_to_trade: float = 0.03    # minimum |bias| score to consider trading
+
+
+@dataclass
+class ContractConfig:
+    """Contract / trade parameters."""
+    contract_type: str = "DIGITEVEN"    # overridden dynamically
+    duration: int = 5                   # ticks
+    duration_unit: str = "t"
+    currency: str = "USD"
+    basis: str = "stake"
+
+
+@dataclass
+class APIConfig:
+    """Deriv API connection settings."""
+    ws_url: str = "wss://ws.derivws.com/websockets/v3"
+    app_id: int = 1089                  # replace with your registered app_id
+    max_req_per_sec: int = 80           # stay under 100 limit
+    max_subscriptions: int = 90         # stay under 100 limit
+    reconnect_delay: float = 5.0        # seconds before reconnect on disconnect
+
+
+@dataclass
+class BotConfig:
+    """Master configuration aggregating all sub-configs."""
+    digit: DigitConfig = field(default_factory=DigitConfig)
+    volatility: VolatilityConfig = field(default_factory=VolatilityConfig)
+    hmm: HMMConfig = field(default_factory=HMMConfig)
+    ensemble: EnsembleConfig = field(default_factory=EnsembleConfig)
+    kelly: KellyConfig = field(default_factory=KellyConfig)
+    martingale: MartingaleConfig = field(default_factory=MartingaleConfig)
+    circuit_breaker: CircuitBreakerConfig = field(default_factory=CircuitBreakerConfig)
+    time_filter: TimeFilterConfig = field(default_factory=TimeFilterConfig)
+    shadow: ShadowConfig = field(default_factory=ShadowConfig)
+    alphabloom: AlphaBloomConfig = field(default_factory=AlphaBloomConfig)
+    index: IndexConfig = field(default_factory=IndexConfig)
+    contract: ContractConfig = field(default_factory=ContractConfig)
+    api: APIConfig = field(default_factory=APIConfig)
+    strategy: str = "ensemble"  # "ensemble" or "alphabloom"
