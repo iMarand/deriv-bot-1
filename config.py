@@ -96,9 +96,18 @@ class ShadowConfig:
 class AlphaBloomConfig:
     """AlphaBloom digit-frequency strategy parameters."""
     window_size: int = 60              # ticks to analyse
-    imbalance_threshold: float = 0.55  # min P(even) or P(odd) to trigger
-    cooldown_ticks: int = 3            # ticks to wait after a trade
-    streak_confirm: int = 3            # consecutive ticks dominant side must lead
+    imbalance_threshold: float = 0.55  # min Even% for GREEN zone (instant trade)
+    cooldown_ticks: int = 2            # ticks to wait after a trade
+    trend_window: int = 8              # ticks to measure Even% trend direction
+
+
+@dataclass
+class PulseConfig:
+    """Pulse dual-timeframe strategy parameters."""
+    fast_window: int = 15              # fast digit window
+    slow_window: int = 50              # slow digit window
+    min_fast_pct: float = 0.53         # min dominant% in fast window
+    cooldown_ticks: int = 1            # ticks to wait after a trade
 
 
 @dataclass
@@ -145,7 +154,8 @@ class BotConfig:
     time_filter: TimeFilterConfig = field(default_factory=TimeFilterConfig)
     shadow: ShadowConfig = field(default_factory=ShadowConfig)
     alphabloom: AlphaBloomConfig = field(default_factory=AlphaBloomConfig)
+    pulse: PulseConfig = field(default_factory=PulseConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
     api: APIConfig = field(default_factory=APIConfig)
-    strategy: str = "ensemble"  # "ensemble" or "alphabloom"
+    strategy: str = "ensemble"  # "ensemble", "alphabloom", or "pulse"

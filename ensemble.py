@@ -1,6 +1,12 @@
 """
 Ensemble Signal Scorer
-Combines multiple weak signals into a composite trade score.
+Combines multiple signals into a composite trade score.
+
+Key improvements:
+  - Multi-timeframe: checks both full window AND recent 15-tick window agree
+  - Direction uses recent bias (not stale full-window bias)
+  - Removed irrelevant signals (price momentum has zero correlation with digits)
+  - Fewer hard gates — let the score decide, not arbitrary blocks
 """
 
 from __future__ import annotations
@@ -41,27 +47,36 @@ class EnsembleScorer:
         regime_det: RegimeDetector,
     ) -> Optional[SignalSnapshot]:
         """Return a SignalSnapshot or None if insufficient data."""
-        if len(digit.window) < 20:  # increased from 10 for more reliable stats
+        if len(digit.window) < 20:
             return None
 
-        # ── Hard gates: reject weak signals before scoring ──
         bias = digit.bias_magnitude
         regime = regime_det.current_regime
 
-        # Gate 1: minimum bias (no point scoring if bias is tiny)
-        if bias < 0.03:
+        # Only hard gate: need some bias to work with
+        if bias < 0.02:
             return None
 
-        # Gate 2: heavily penalize choppy regime (but don't block entirely)
-        if regime == Regime.CHOPPY and bias < 0.08:
-            return None  # only block weak signals in choppy
-
-        # ── 1. Digit bias (primary signal) ──
+        # ── 1. Full-window digit bias (weight: 0.30) ──
+        # How far even/odd is from 50/50 over the full window
         norm_bias = min(bias / 0.15, 1.0)
 
-        # ── 2. Chi-square significance ──
+        # ── 2. Recent-window bias (weight: 0.30) ──
+        # Does the RECENT data confirm the full-window bias?
+        # This is the key intelligence — full window could be stale
+        recent = list(digit.window)[-15:]
+        recent_even = sum(1 for d in recent if d % 2 == 0) / len(recent)
+        recent_bias = abs(recent_even - 0.5)
+        norm_recent = min(recent_bias / 0.15, 1.0)
+
+        # ── 3. Agreement bonus (weight: 0.20) ──
+        # Do full window and recent window agree on direction?
+        full_dir = "EVEN" if digit.p_even >= 0.5 else "ODD"
+        recent_dir = "EVEN" if recent_even >= 0.5 else "ODD"
+        agreement = 1.0 if full_dir == recent_dir else 0.0
+
+        # ── 4. Chi-square significance (weight: 0.10) ──
         _, p_val = digit.chi_square_test()
-        # Graduated: strong significance = 1.0, marginal = 0.5, none = 0.0
         if p_val < 0.01:
             chi_sig = 1.0
         elif p_val < digit.cfg.chi_sq_alpha:
@@ -69,47 +84,23 @@ class EnsembleScorer:
         else:
             chi_sig = 0.0
 
-        # ── 3. Entropy ──
+        # ── 5. Low entropy bonus (weight: 0.10) ──
         ent = digit.digit_entropy()
         norm_entropy = max(0, 1.0 - ent / self.MAX_ENTROPY)
 
-        # ── 4. Recent-window bias confirmation ──
-        # Check if the bias is consistent in the most recent 15 ticks
-        # (confirms trend isn't stale / about to flip)
-        recent = list(digit.window)[-15:]
-        recent_p_even = sum(1 for d in recent if d % 2 == 0) / len(recent) if recent else 0.5
-        recent_bias = abs(recent_p_even - 0.5)
-        norm_recent = min(recent_bias / 0.15, 1.0)
-
-        # ── 5. Regime bonus ──
-        if regime == Regime.MEAN_REVERTING:
-            regime_score = 1.0
-        elif regime == Regime.TRENDING:
-            regime_score = 0.5
-        else:
-            regime_score = 0.3  # UNKNOWN
-
         # ── Weighted combination ──
-        # Replaced momentum (irrelevant to digit outcomes) with recent-window confirmation
-        w = self.cfg
         composite = (
-            w.weight_digit_bias * norm_bias
-            + w.weight_chi_sq * chi_sig
-            + w.weight_entropy * norm_entropy
-            + w.weight_momentum * norm_recent    # reuse momentum weight for recent bias
-            + w.weight_regime * regime_score
+            0.30 * norm_bias
+            + 0.30 * norm_recent
+            + 0.20 * agreement
+            + 0.10 * chi_sig
+            + 0.10 * norm_entropy
         )
 
-        # ── Direction: follow the dominant side (trend-following on digits) ──
-        # In mean-reverting regime, go contrarian (the over-represented side
-        # is expected to correct), otherwise follow the majority.
-        p_even = digit.p_even
-        if regime == Regime.MEAN_REVERTING:
-            # Contrarian: if even is dominant, bet ODD (expect reversion)
-            direction = "ODD" if p_even >= 0.5 else "EVEN"
-        else:
-            # Trend-following: bet the dominant side
-            direction = "EVEN" if p_even >= 0.5 else "ODD"
+        # ── Direction: use the RECENT window (more responsive) ──
+        # If recent and full agree → high confidence
+        # If they disagree → the composite score will be low anyway (agreement=0)
+        direction = recent_dir
 
         return SignalSnapshot(
             digit_bias=bias,

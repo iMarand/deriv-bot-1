@@ -1,62 +1,50 @@
 """
 AlphaBloom Digit Frequency Strategy
-Simple even/odd frequency analysis over recent ticks.
-Trades the dominant side when imbalance exceeds a threshold.
+
+Trade the dominant side (EVEN or ODD) when it has a clear edge:
+  - Even ≥ 55% → trade EVEN
+  - Odd  ≥ 55% → trade ODD
+  - 50-55% either side + rising trend → trade that side
+  - No clear winner → wait
+Scans all indices, picks the strongest imbalance.
 """
 
 from __future__ import annotations
 
+import logging
 from collections import deque
-from dataclasses import dataclass
 from typing import Optional
 
 from ensemble import SignalSnapshot
 from regime import Regime, RegimeDetector
 
-
-@dataclass
-class AlphaBloomConfig:
-    """AlphaBloom strategy parameters."""
-    window_size: int = 60          # number of recent ticks to analyse
-    imbalance_threshold: float = 0.55  # min P(even) or P(odd) to trigger a trade
-    cooldown_ticks: int = 3        # ticks to wait after a trade before next signal
-    streak_confirm: int = 3        # consecutive ticks the dominant side must lead
+logger = logging.getLogger("alphabloom")
 
 
 class AlphaBloomScorer:
     """
-    Digit-frequency strategy inspired by the AlphaBloom approach.
-
-    Algorithm:
-      1. Collect last N price ticks, extract last digit of each.
-      2. Count even (0,2,4,6,8) vs odd (1,3,5,7,9) digits.
-      3. Compute percentages.
-      4. If one side exceeds the imbalance threshold -> trade that side.
-      5. Optional streak confirmation: the dominant side must have led
-         for `streak_confirm` consecutive ticks before triggering.
+    Per-symbol digit frequency analyser.
+    Trades BOTH sides — whichever is dominant.
     """
 
-    def __init__(self, cfg: AlphaBloomConfig):
-        self.cfg = cfg
-        self._digits: deque[int] = deque(maxlen=cfg.window_size)
+    def __init__(self, window_size: int = 60, imbalance_threshold: float = 0.55,
+                 cooldown_ticks: int = 2, trend_window: int = 8):
+        self.window_size = window_size
+        self.imbalance_threshold = imbalance_threshold
+        self.cooldown_ticks = cooldown_ticks
+        self.trend_window = trend_window
+
+        self._digits: deque[int] = deque(maxlen=window_size)
         self._cooldown: int = 0
-        self._streak_count: int = 0
-        self._last_dominant: Optional[str] = None
+        self._pct_history: deque[float] = deque(maxlen=200)
 
     def update(self, quote: str) -> None:
-        """Feed a new tick quote string. Extracts and stores the last digit."""
         digit = self._last_digit(quote)
         self._digits.append(digit)
         if self._cooldown > 0:
             self._cooldown -= 1
-
-        # Track streak of consistent dominance
-        dominant = self._current_dominant()
-        if dominant is not None and dominant == self._last_dominant:
-            self._streak_count += 1
-        else:
-            self._streak_count = 1
-        self._last_dominant = dominant
+        if len(self._digits) >= 10:
+            self._pct_history.append(self.p_even)
 
     @staticmethod
     def _last_digit(quote: str) -> int:
@@ -64,61 +52,67 @@ class AlphaBloomScorer:
         return int(digits_only[-1]) if digits_only else 0
 
     @property
-    def even_count(self) -> int:
-        return sum(1 for d in self._digits if d % 2 == 0)
-
-    @property
-    def odd_count(self) -> int:
-        return len(self._digits) - self.even_count
-
-    @property
     def p_even(self) -> float:
         n = len(self._digits)
         if n == 0:
             return 0.5
-        return self.even_count / n
+        return sum(1 for d in self._digits if d % 2 == 0) / n
 
     @property
     def p_odd(self) -> float:
         return 1.0 - self.p_even
 
-    def _current_dominant(self) -> Optional[str]:
-        """Return the currently dominant side, or None if no clear imbalance."""
-        if len(self._digits) < 20:
-            return None
-        if self.p_even >= self.cfg.imbalance_threshold:
-            return "EVEN"
-        if self.p_odd >= self.cfg.imbalance_threshold:
-            return "ODD"
-        return None
+    @property
+    def dominant_pct(self) -> float:
+        """The higher of Even% or Odd%."""
+        return max(self.p_even, self.p_odd)
+
+    @property
+    def trend(self) -> float:
+        """Change in Even% over trend window. Positive = Even rising, Negative = Odd rising."""
+        h = self._pct_history
+        tw = self.trend_window
+        if len(h) < tw:
+            return 0.0
+        return h[-1] - h[-tw]
+
+    @property
+    def warmed(self) -> bool:
+        return len(self._digits) >= 20
+
+    def zone(self) -> str:
+        """Current zone: GREEN (strong), MOMENTUM (weak+trending), or WAIT."""
+        if self.dominant_pct >= self.imbalance_threshold:
+            return "GREEN"
+        elif self.dominant_pct >= 0.50:
+            # Check if the dominant side is trending stronger
+            if self.p_even > 0.5 and self.trend > 0.005:
+                return "MOMENTUM"
+            if self.p_odd > 0.5 and self.trend < -0.005:
+                return "MOMENTUM"
+            return "WAIT"
+        return "WAIT"
+
+    @property
+    def direction(self) -> str:
+        return "EVEN" if self.p_even >= self.p_odd else "ODD"
 
     def score(self, regime_det: Optional[RegimeDetector] = None) -> Optional[SignalSnapshot]:
-        """
-        Return a SignalSnapshot if conditions are met, else None.
-
-        The composite_score is the imbalance magnitude (0.5 to 1.0 mapped to 0.0 to 1.0)
-        so it integrates with the existing threshold system.
-        """
-        n = len(self._digits)
-        if n < 20:
+        if not self.warmed or self._cooldown > 0:
             return None
 
-        if self._cooldown > 0:
+        z = self.zone()
+        if z == "WAIT":
             return None
 
-        dominant = self._current_dominant()
-        if dominant is None:
-            return None
+        dom = self.dominant_pct
+        imbalance = dom - 0.5
 
-        # Streak confirmation: dominant side must hold for N consecutive ticks
-        if self._streak_count < self.cfg.streak_confirm:
-            return None
-
-        # Compute score as the imbalance strength (0.0 to 1.0)
-        p_dominant = self.p_even if dominant == "EVEN" else self.p_odd
-        # Map [threshold, 1.0] -> [0.5, 1.0] for composite score
-        imbalance = p_dominant - 0.5  # 0.0 to 0.5
-        composite = min(imbalance / 0.25, 1.0)  # normalise: 0.25 imbalance = score 1.0
+        if z == "GREEN":
+            composite = 0.5 + min(imbalance / 0.20, 0.5)
+        else:
+            t = abs(self.trend)
+            composite = 0.3 + min(t / 0.05, 0.3)
 
         regime = Regime.UNKNOWN
         if regime_det is not None:
@@ -128,19 +122,16 @@ class AlphaBloomScorer:
             digit_bias=imbalance,
             chi_sq_significant=False,
             entropy=0.0,
-            momentum=0.0,
+            momentum=self.trend,
             regime=regime,
             composite_score=composite,
-            direction=dominant,
+            direction=self.direction,
         )
 
     def on_trade_placed(self) -> None:
-        """Call after a trade is placed to activate cooldown."""
-        self._cooldown = self.cfg.cooldown_ticks
+        self._cooldown = self.cooldown_ticks
 
     def reset(self) -> None:
-        """Reset state (e.g. when switching symbols)."""
         self._digits.clear()
+        self._pct_history.clear()
         self._cooldown = 0
-        self._streak_count = 0
-        self._last_dominant = None

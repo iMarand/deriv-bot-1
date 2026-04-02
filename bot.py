@@ -25,6 +25,7 @@ from analysis import DigitTracker, VolatilityTracker
 from regime import RegimeDetector, Regime
 from ensemble import EnsembleScorer, SignalSnapshot
 from alphabloom import AlphaBloomScorer
+from pulse import PulseScorer
 from money import (
     MartingaleEngine,
     KellyCalculator,
@@ -94,6 +95,7 @@ class DerivBot:
         self._vol_trackers: Dict[str, VolatilityTracker] = {}
         self._regime_detectors: Dict[str, RegimeDetector] = {}
         self._ab_scorers: Dict[str, AlphaBloomScorer] = {}  # per-symbol AlphaBloom
+        self._pulse_scorers: Dict[str, PulseScorer] = {}  # per-symbol Pulse
 
         # Shared components
         self.scorer = EnsembleScorer(self.cfg.ensemble)
@@ -149,7 +151,20 @@ class DerivBot:
             self._digit_trackers[symbol] = DigitTracker(self.cfg.digit)
             self._vol_trackers[symbol] = VolatilityTracker(self.cfg.volatility)
             self._regime_detectors[symbol] = RegimeDetector(self.cfg.hmm)
-            self._ab_scorers[symbol] = AlphaBloomScorer(self.cfg.alphabloom)
+            ab_cfg = self.cfg.alphabloom
+            self._ab_scorers[symbol] = AlphaBloomScorer(
+                window_size=ab_cfg.window_size,
+                imbalance_threshold=ab_cfg.imbalance_threshold,
+                cooldown_ticks=ab_cfg.cooldown_ticks,
+                trend_window=ab_cfg.trend_window,
+            )
+            p_cfg = self.cfg.pulse
+            self._pulse_scorers[symbol] = PulseScorer(
+                fast_window=p_cfg.fast_window,
+                slow_window=p_cfg.slow_window,
+                min_fast_pct=p_cfg.min_fast_pct,
+                cooldown_ticks=p_cfg.cooldown_ticks,
+            )
             self._tick_counts[symbol] = 0
             self._symbol_status[symbol] = "warming up"
             self._symbol_scores[symbol] = 0.0
@@ -157,6 +172,12 @@ class DerivBot:
     def _set_symbol_status(self, symbol: str, status: str, score: float = 0.0) -> None:
         self._symbol_status[symbol] = status
         self._symbol_scores[symbol] = score
+
+    def _regime_required(self) -> bool:
+        return self.cfg.ensemble.require_known_regime
+
+    def _regime_ready(self, rd: RegimeDetector) -> bool:
+        return (not self._regime_required()) or rd.current_regime != Regime.UNKNOWN
 
     def _maybe_log_status(self) -> None:
         now = time.time()
@@ -375,6 +396,8 @@ class DerivBot:
         vt.update(price)
         ab = self._ab_scorers[symbol]
         ab.update(quote_str)
+        ps = self._pulse_scorers[symbol]
+        ps.update(quote_str)
 
         if len(vt.returns) > 0:
             rd.update(float(vt.returns[-1]))
@@ -389,111 +412,146 @@ class DerivBot:
             self._set_symbol_status(symbol, "blocked by time filter")
             return None
 
-        # Circuit breaker may be active
-        # (doesn't block, just reduces stake — checked at stake calc)
-
-        # ── Strategy dispatch ──
-        if self.cfg.strategy == "alphabloom":
-            return self._process_tick_alphabloom(symbol, ab, rd)
-        else:
-            return self._process_tick_ensemble(symbol, dt, vt, rd)
-
-    def _process_tick_alphabloom(
-        self, symbol: str, ab: AlphaBloomScorer, rd: RegimeDetector,
-    ) -> Optional[Tuple[str, SignalSnapshot]]:
-        """AlphaBloom strategy: pure digit frequency."""
-        n = len(ab._digits)
-        if n < 20:
-            self._set_symbol_status(symbol, f"warming {n}/20 ticks")
-            return None
-
-        signal = ab.score(regime_det=rd)
-        if signal is None:
-            p_e = ab.p_even
-            p_o = ab.p_odd
-            thresh = self.cfg.alphabloom.imbalance_threshold
-            self._set_symbol_status(
-                symbol,
-                f"even={p_e:.1%} odd={p_o:.1%} (need >{thresh:.0%})",
-                max(p_e, p_o),
-            )
-            return None
-
-        if signal.composite_score < self.cfg.ensemble.entry_score_threshold:
-            self._set_symbol_status(
-                symbol,
-                f"score {signal.composite_score:.3f} below threshold {self.cfg.ensemble.entry_score_threshold:.3f}",
-                signal.composite_score,
-            )
-            return None
-
-        self._set_symbol_status(
-            symbol,
-            (
-                f"AB candidate dir={signal.direction} "
-                f"even={ab.p_even:.1%} odd={ab.p_odd:.1%} "
-                f"score={signal.composite_score:.3f}"
-            ),
-            signal.composite_score,
-        )
-        return (symbol, signal)
-
-    def _process_tick_ensemble(
-        self, symbol: str, dt: DigitTracker, vt: VolatilityTracker, rd: RegimeDetector,
-    ) -> Optional[Tuple[str, SignalSnapshot]]:
-        """Original ensemble strategy."""
-        if self.cfg.ensemble.require_known_regime and rd.current_regime == Regime.UNKNOWN:
+        if not self._regime_ready(rd):
             self._set_symbol_status(
                 symbol,
                 f"waiting for regime {len(rd.returns_buf)}/{self.cfg.hmm.lookback} returns",
             )
             return None
 
-        # Ensemble score
+        # ── Strategy dispatch ──
+        strategy = self.cfg.strategy
+        if strategy == "alphabloom":
+            return self._process_tick_alphabloom(symbol, ab, rd)
+        elif strategy == "pulse":
+            return self._process_tick_pulse(symbol, ps, rd)
+        else:
+            return self._process_tick_ensemble(symbol, dt, vt, rd)
+
+    def _process_tick_alphabloom(
+        self, symbol: str, ab: AlphaBloomScorer, rd: RegimeDetector,
+    ) -> Optional[Tuple[str, SignalSnapshot]]:
+        """AlphaBloom: scan all indices, trade the best one (EVEN or ODD)."""
+        if not ab.warmed:
+            self._set_symbol_status(symbol, f"warming {len(ab._digits)}/20 ticks")
+            return None
+
+        zone = ab.zone()
+        self._set_symbol_status(
+            symbol,
+            f"[{zone}] {ab.direction} {ab.dominant_pct:.1%} trend={ab.trend:+.1%}",
+            ab.dominant_pct if zone != "WAIT" else 0.0,
+        )
+
+        # Scan ALL symbols, pick strongest
+        best_sym: Optional[str] = None
+        best_sig: Optional[SignalSnapshot] = None
+        best_dom: float = -1.0
+
+        for s, s_ab in self._ab_scorers.items():
+            if not s_ab.warmed:
+                continue
+            s_rd = self._regime_detectors.get(s)
+            if s_rd is None or not self._regime_ready(s_rd):
+                continue
+            sig = s_ab.score(regime_det=s_rd)
+            if sig is None or sig.composite_score < self.cfg.ensemble.entry_score_threshold:
+                continue
+            if s_ab.dominant_pct > best_dom:
+                best_dom = s_ab.dominant_pct
+                best_sym = s
+                best_sig = sig
+
+        if best_sym is None or best_sig is None:
+            return None
+        if best_sym != symbol:
+            self._set_symbol_status(
+                symbol,
+                f"[{zone}] — {best_sym} is better ({best_dom:.1%})",
+                0.0,
+            )
+            return None
+
+        self._set_symbol_status(
+            symbol,
+            f"[{zone}] TRADE {best_sig.direction} — {ab.dominant_pct:.1%} score={best_sig.composite_score:.3f}",
+            best_sig.composite_score,
+        )
+        return (symbol, best_sig)
+
+    def _process_tick_pulse(
+        self, symbol: str, ps: PulseScorer, rd: RegimeDetector,
+    ) -> Optional[Tuple[str, SignalSnapshot]]:
+        """Pulse: dual-timeframe, scan all indices, trade the strongest aligned one."""
+        if not ps.warmed:
+            self._set_symbol_status(symbol, f"warming {len(ps._digits)}/{ps.slow_window} ticks")
+            return None
+
+        aligned = ps.aligned
+        self._set_symbol_status(
+            symbol,
+            f"fast={ps.fast_dir}({ps.fast_even:.1%}) slow={ps.slow_dir}({ps.slow_even:.1%}) {'ALIGNED' if aligned else 'split'}",
+            ps.fast_even if aligned else 0.0,
+        )
+
+        # Scan ALL symbols for best pulse signal
+        best_sym: Optional[str] = None
+        best_sig: Optional[SignalSnapshot] = None
+        best_score: float = -1.0
+
+        for s, s_ps in self._pulse_scorers.items():
+            if not s_ps.warmed:
+                continue
+            s_rd = self._regime_detectors.get(s)
+            if s_rd is None or not self._regime_ready(s_rd):
+                continue
+            sig = s_ps.score(regime_det=s_rd)
+            if sig is None or sig.composite_score < self.cfg.ensemble.entry_score_threshold:
+                continue
+            if sig.composite_score > best_score:
+                best_score = sig.composite_score
+                best_sym = s
+                best_sig = sig
+
+        if best_sym is None or best_sig is None:
+            return None
+        if best_sym != symbol:
+            return None
+
+        self._set_symbol_status(
+            symbol,
+            f"TRADE {best_sig.direction} — fast={ps.fast_even:.1%} slow={ps.slow_even:.1%} score={best_sig.composite_score:.3f}",
+            best_sig.composite_score,
+        )
+        return (symbol, best_sig)
+
+    def _process_tick_ensemble(
+        self, symbol: str, dt: DigitTracker, vt: VolatilityTracker, rd: RegimeDetector,
+    ) -> Optional[Tuple[str, SignalSnapshot]]:
+        """Ensemble strategy: multi-signal scoring with dual-window confirmation."""
         signal = self.scorer.score(dt, vt, rd)
         if signal is None:
             if len(dt.window) < 20:
                 self._set_symbol_status(symbol, f"warming {len(dt.window)}/20 ticks")
-            elif dt.bias_magnitude < 0.03:
+            elif dt.bias_magnitude < 0.02:
                 self._set_symbol_status(symbol, f"bias too low ({dt.bias_magnitude:.3f})")
-            elif rd.current_regime == Regime.CHOPPY and dt.bias_magnitude < 0.08:
-                self._set_symbol_status(symbol, f"choppy regime, weak bias ({dt.bias_magnitude:.3f})")
-            elif len(rd.returns_buf) < self.cfg.hmm.lookback:
-                self._set_symbol_status(
-                    symbol,
-                    f"regime warming {len(rd.returns_buf)}/{self.cfg.hmm.lookback} returns",
-                )
             else:
-                self._set_symbol_status(symbol, "signal unavailable")
+                self._set_symbol_status(symbol, "no signal")
             return None
+
         if signal.composite_score < self.cfg.ensemble.entry_score_threshold:
             self._set_symbol_status(
                 symbol,
-                f"score {signal.composite_score:.3f} below threshold {self.cfg.ensemble.entry_score_threshold:.3f}",
-                signal.composite_score,
-            )
-            return None
-
-        # CUSUM alarm boosts confidence — only require for very borderline scores
-        # (within 0.03 of threshold) to avoid filtering out most trades
-        borderline_band = 0.03
-        if not dt.cusum_alarm and signal.composite_score < self.cfg.ensemble.entry_score_threshold + borderline_band:
-            self._set_symbol_status(
-                symbol,
-                f"score {signal.composite_score:.3f} needs CUSUM confirmation",
+                f"score {signal.composite_score:.3f} < {self.cfg.ensemble.entry_score_threshold:.3f}",
                 signal.composite_score,
             )
             return None
 
         self._set_symbol_status(
             symbol,
-            (
-                f"candidate score={signal.composite_score:.3f} "
-                f"bias={signal.digit_bias:.3f} regime={signal.regime.name}"
-            ),
+            f"candidate {signal.direction} score={signal.composite_score:.3f} bias={signal.digit_bias:.3f}",
             signal.composite_score,
         )
-
         return (symbol, signal)
 
     async def _request_proposal(self, symbol: str, signal: SignalSnapshot) -> None:
@@ -580,9 +638,13 @@ class DerivBot:
         self.active_contract = str(contract_id)
         self._last_contract_update_ts = time.time()
         self._contract_poll_attempts = 0
-        # Notify AlphaBloom scorers of trade placement (cooldown)
-        if self._active_contract_symbol and self._active_contract_symbol in self._ab_scorers:
-            self._ab_scorers[self._active_contract_symbol].on_trade_placed()
+        # Notify scorers of trade placement (cooldown)
+        sym = self._active_contract_symbol
+        if sym:
+            if sym in self._ab_scorers:
+                self._ab_scorers[sym].on_trade_placed()
+            if sym in self._pulse_scorers:
+                self._pulse_scorers[sym].on_trade_placed()
         logger.info(f"Buy accepted: contract_id={contract_id} | monitoring open contract")
         await self._send(
             {
@@ -737,26 +799,30 @@ class DerivBot:
             await self._poll_stuck_contract()
             if result and not self.martingale.is_stopped:
                 symbol, signal = result
-                # Multi-index: check if this is the best index
-                trackers = {
-                    s: (self._digit_trackers[s], self._vol_trackers[s])
-                    for s in self._digit_trackers
-                }
-                regimes = {
-                    s: self._regime_detectors[s].current_regime
-                    for s in self._regime_detectors
-                }
-                best = self.index_selector.best(trackers, regimes)
-                if best and best.symbol == symbol:
-                    self._last_best_symbol = best.symbol
+                if self.cfg.strategy == "ensemble":
+                    trackers = {
+                        s: (self._digit_trackers[s], self._vol_trackers[s])
+                        for s in self._digit_trackers
+                        if self._regime_ready(self._regime_detectors[s])
+                    }
+                    regimes = {
+                        s: self._regime_detectors[s].current_regime
+                        for s in trackers
+                    }
+                    best = self.index_selector.best(trackers, regimes)
+                    if best and best.symbol == symbol:
+                        self._last_best_symbol = best.symbol
+                        await self._request_proposal(symbol, signal)
+                    elif best:
+                        self._last_best_symbol = best.symbol
+                        self._set_symbol_status(
+                            symbol,
+                            f"candidate, but {best.symbol} ranks higher ({best.adjusted_score:.3f})",
+                            signal.composite_score,
+                        )
+                else:
+                    self._last_best_symbol = symbol
                     await self._request_proposal(symbol, signal)
-                elif best:
-                    self._last_best_symbol = best.symbol
-                    self._set_symbol_status(
-                        symbol,
-                        f"candidate, but {best.symbol} ranks higher ({best.adjusted_score:.3f})",
-                        signal.composite_score,
-                    )
             self._maybe_log_status()
 
         elif msg_type == "proposal":
@@ -798,15 +864,27 @@ class DerivBot:
                 logger.info("═" * 60)
                 logger.info("  Bot is LIVE — listening for signals...")
                 logger.info(f"  Strategy: {self.cfg.strategy}")
+                if self.cfg.strategy == "alphabloom":
+                    ab_cfg = self.cfg.alphabloom
+                    logger.info(f"  AB window: {ab_cfg.window_size} ticks")
+                    logger.info(f"  AB GREEN zone: dominant ≥ {ab_cfg.imbalance_threshold:.0%}")
+                    logger.info("  AB MOMENTUM zone: 50-55% + rising trend")
+                    logger.info("  AB trades EVEN or ODD — picks best index")
+                elif self.cfg.strategy == "pulse":
+                    p_cfg = self.cfg.pulse
+                    logger.info(f"  Pulse fast: {p_cfg.fast_window} ticks | slow: {p_cfg.slow_window} ticks")
+                    logger.info(f"  Pulse min fast edge: {p_cfg.min_fast_pct:.0%}")
+                    logger.info("  Pulse mode: dual-timeframe, trades when both agree")
                 logger.info(f"  Indices: {self.cfg.index.symbols}")
                 logger.info(f"  Base stake: ${self.cfg.martingale.base_stake_usd}")
                 logger.info(f"  Profit target: ${self.cfg.martingale.profit_target_usd}")
                 logger.info(f"  Loss limit: ${self.cfg.martingale.loss_limit_usd}")
                 logger.info(f"  Score threshold: {self.cfg.ensemble.entry_score_threshold:.3f}")
                 logger.info(f"  Kelly sizing: {'enabled' if self.cfg.kelly.enabled else 'disabled'}")
-                logger.info(
-                    f"  Require known regime: {'yes' if self.cfg.ensemble.require_known_regime else 'no'}"
-                )
+                if self.cfg.strategy == "ensemble":
+                    logger.info(
+                        f"  Require known regime: {'yes' if self.cfg.ensemble.require_known_regime else 'no'}"
+                    )
                 logger.info(f"  Regime warmup: {self.cfg.hmm.lookback} returns per symbol")
                 if self.cfg.contract.duration_unit == "t":
                     logger.info(
@@ -916,9 +994,9 @@ def main():
     parser.add_argument("--score-threshold", type=float, default=0.60, help="Ensemble score threshold")
     parser.add_argument(
         "--strategy",
-        choices=("ensemble", "alphabloom"),
+        choices=("ensemble", "alphabloom", "pulse"),
         default="ensemble",
-        help="Trading strategy: 'ensemble' (multi-signal) or 'alphabloom' (digit frequency)",
+        help="Trading strategy: 'ensemble', 'alphabloom', or 'pulse' (dual-timeframe)",
     )
     parser.add_argument(
         "--ab-window", type=int, default=60,
@@ -927,6 +1005,14 @@ def main():
     parser.add_argument(
         "--ab-threshold", type=float, default=0.55,
         help="AlphaBloom: min even/odd percentage to trigger trade (default 0.55)",
+    )
+    parser.add_argument(
+        "--pulse-fast", type=int, default=15,
+        help="Pulse: fast window size in ticks (default 15)",
+    )
+    parser.add_argument(
+        "--pulse-slow", type=int, default=50,
+        help="Pulse: slow window size in ticks (default 50)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     args = parser.parse_args()
@@ -952,6 +1038,8 @@ def main():
     cfg.ensemble.require_known_regime = args.require_known_regime
     cfg.kelly.enabled = not args.disable_kelly
     cfg.strategy = args.strategy
+    cfg.pulse.fast_window = args.pulse_fast
+    cfg.pulse.slow_window = args.pulse_slow
     cfg.alphabloom.window_size = args.ab_window
     cfg.alphabloom.imbalance_threshold = args.ab_threshold
     if args.symbols:
