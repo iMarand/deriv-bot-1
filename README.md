@@ -72,3 +72,33 @@ python bot.py --token YOUR_DERIV_TOKEN --account-mode demo --base-stake 1.0 --pr
 ## Risk Warning
 
 **Trading synthetic indices is high risk.** Martingale strategies can rapidly deplete an account. This bot makes no guarantee of profit. Always test on a demo account first. Only trade with capital you can afford to lose. Past backtest results do not predict future performance.
+
+## More Commands
+
+### 1. Other 
+```
+
+python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --strategy alphabloom --ab-window 40 --save-app-json data/trades-1.json
+
+```
+
+### 2. ANALYSE DIGITAL GROUP BASED
+
+```
+
+python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --ab-threshold 0.50 --require-known-regime --disable-kelly --save-app-json data/trades.json
+
+```
+
+### 3. SOMEHOW RELIABLE
+
+```
+
+python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --strategy ensemble --ab-window 40 --save-app-json data/trades-1.json
+
+```
+
+
+
+
+
