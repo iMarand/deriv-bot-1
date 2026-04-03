@@ -66,6 +66,9 @@ python bot.py --token YOUR_DERIV_TOKEN --account-mode demo --base-stake 1.0 --pr
 | `--save-app-json` | none | Write session/trade JSON for frontend graphs (`app_data.json` if passed without a value) |
 | `--disable-kelly` | false | Disable Kelly sizing and use base stake + Martingale only |
 | `--require-known-regime` | false | Block entries until a symbol's regime is no longer `UNKNOWN` |
+| `--even-priority` | false | Prefer `DIGITEVEN` and require a higher score for `DIGITODD` |
+| `--odd-extra-threshold` | 0.12 | Extra score required for `DIGITODD` when `--even-priority` is enabled |
+| `--even-score-bonus` | 0.05 | Ranking bonus added to `DIGITEVEN` when `--even-priority` is enabled |
 | `--score-threshold` | 0.60 | Min ensemble score to trade |
 | `--debug` | false | Verbose logging |
 
@@ -78,7 +81,7 @@ python bot.py --token YOUR_DERIV_TOKEN --account-mode demo --base-stake 1.0 --pr
 ### 1. Other 
 ```
 
-python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --strategy alphabloom --ab-window 40 --save-app-json data/trades-1.json
+python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --even-priority --odd-extra-threshold 0.35 --even-score-bonus 0.12 --strategy alphabloom --ab-window 40 --save-app-json data/trades-1.json
 
 ```
 
@@ -97,8 +100,6 @@ python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --pro
 python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --strategy ensemble --ab-window 40 --save-app-json data/trades-1.json
 
 ```
-
-
 
 
 

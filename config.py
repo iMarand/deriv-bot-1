@@ -132,6 +132,14 @@ class ContractConfig:
 
 
 @dataclass
+class DirectionPreferenceConfig:
+    """Optional bias toward EVEN trades across all strategies."""
+    even_priority: bool = False
+    even_score_bonus: float = 0.05
+    odd_extra_threshold: float = 0.12
+
+
+@dataclass
 class APIConfig:
     """Deriv API connection settings."""
     ws_url: str = "wss://ws.derivws.com/websockets/v3"
@@ -157,5 +165,6 @@ class BotConfig:
     pulse: PulseConfig = field(default_factory=PulseConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
+    direction: DirectionPreferenceConfig = field(default_factory=DirectionPreferenceConfig)
     api: APIConfig = field(default_factory=APIConfig)
     strategy: str = "ensemble"  # "ensemble", "alphabloom", or "pulse"

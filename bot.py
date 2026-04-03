@@ -179,6 +179,21 @@ class DerivBot:
     def _regime_ready(self, rd: RegimeDetector) -> bool:
         return (not self._regime_required()) or rd.current_regime != Regime.UNKNOWN
 
+    def _direction_threshold(self, signal: SignalSnapshot) -> float:
+        threshold = self.cfg.ensemble.entry_score_threshold
+        if self.cfg.direction.even_priority and signal.direction == "ODD":
+            threshold += self.cfg.direction.odd_extra_threshold
+        return threshold
+
+    def _direction_adjusted_score(self, signal: SignalSnapshot) -> float:
+        adjusted = signal.composite_score
+        if self.cfg.direction.even_priority and signal.direction == "EVEN":
+            adjusted += self.cfg.direction.even_score_bonus
+        return adjusted
+
+    def _passes_direction_policy(self, signal: SignalSnapshot) -> bool:
+        return signal.composite_score >= self._direction_threshold(signal)
+
     def _maybe_log_status(self) -> None:
         now = time.time()
         if now - self._last_status_log_ts < 15:
@@ -446,7 +461,7 @@ class DerivBot:
         # Scan ALL symbols, pick strongest
         best_sym: Optional[str] = None
         best_sig: Optional[SignalSnapshot] = None
-        best_dom: float = -1.0
+        best_rank: float = -1.0
 
         for s, s_ab in self._ab_scorers.items():
             if not s_ab.warmed:
@@ -455,19 +470,31 @@ class DerivBot:
             if s_rd is None or not self._regime_ready(s_rd):
                 continue
             sig = s_ab.score(regime_det=s_rd)
-            if sig is None or sig.composite_score < self.cfg.ensemble.entry_score_threshold:
+            if sig is None or not self._passes_direction_policy(sig):
                 continue
-            if s_ab.dominant_pct > best_dom:
-                best_dom = s_ab.dominant_pct
+            rank = self._direction_adjusted_score(sig)
+            if rank > best_rank:
+                best_rank = rank
                 best_sym = s
                 best_sig = sig
 
         if best_sym is None or best_sig is None:
+            current_sig = ab.score(regime_det=rd)
+            if current_sig is not None and not self._passes_direction_policy(current_sig):
+                needed = self._direction_threshold(current_sig)
+                self._set_symbol_status(
+                    symbol,
+                    (
+                        f"[{zone}] {current_sig.direction} blocked by even-priority "
+                        f"({current_sig.composite_score:.3f} < {needed:.3f})"
+                    ),
+                    current_sig.composite_score,
+                )
             return None
         if best_sym != symbol:
             self._set_symbol_status(
                 symbol,
-                f"[{zone}] — {best_sym} is better ({best_dom:.1%})",
+                f"[{zone}] — {best_sym} is better ({self._direction_adjusted_score(best_sig):.3f})",
                 0.0,
             )
             return None
@@ -506,14 +533,26 @@ class DerivBot:
             if s_rd is None or not self._regime_ready(s_rd):
                 continue
             sig = s_ps.score(regime_det=s_rd)
-            if sig is None or sig.composite_score < self.cfg.ensemble.entry_score_threshold:
+            if sig is None or not self._passes_direction_policy(sig):
                 continue
-            if sig.composite_score > best_score:
-                best_score = sig.composite_score
+            rank = self._direction_adjusted_score(sig)
+            if rank > best_score:
+                best_score = rank
                 best_sym = s
                 best_sig = sig
 
         if best_sym is None or best_sig is None:
+            current_sig = ps.score(regime_det=rd)
+            if current_sig is not None and not self._passes_direction_policy(current_sig):
+                needed = self._direction_threshold(current_sig)
+                self._set_symbol_status(
+                    symbol,
+                    (
+                        f"{current_sig.direction} blocked by even-priority "
+                        f"({current_sig.composite_score:.3f} < {needed:.3f})"
+                    ),
+                    current_sig.composite_score,
+                )
             return None
         if best_sym != symbol:
             return None
@@ -539,10 +578,18 @@ class DerivBot:
                 self._set_symbol_status(symbol, "no signal")
             return None
 
-        if signal.composite_score < self.cfg.ensemble.entry_score_threshold:
+        threshold = self._direction_threshold(signal)
+        if signal.composite_score < threshold:
+            if self.cfg.direction.even_priority and signal.direction == "ODD":
+                self._set_symbol_status(
+                    symbol,
+                    f"ODD blocked by even-priority ({signal.composite_score:.3f} < {threshold:.3f})",
+                    signal.composite_score,
+                )
+                return None
             self._set_symbol_status(
                 symbol,
-                f"score {signal.composite_score:.3f} < {self.cfg.ensemble.entry_score_threshold:.3f}",
+                f"score {signal.composite_score:.3f} < {threshold:.3f}",
                 signal.composite_score,
             )
             return None
@@ -556,7 +603,7 @@ class DerivBot:
 
     async def _request_proposal(self, symbol: str, signal: SignalSnapshot) -> None:
         contract_type = f"DIGIT{signal.direction}"
-        threshold = self.cfg.ensemble.entry_score_threshold
+        threshold = self._direction_threshold(signal)
         if signal.composite_score < threshold:
             logger.warning(
                 "Skipping proposal below threshold: symbol=%s score=%.3f threshold=%.3f",
@@ -880,11 +927,20 @@ class DerivBot:
                 logger.info(f"  Profit target: ${self.cfg.martingale.profit_target_usd}")
                 logger.info(f"  Loss limit: ${self.cfg.martingale.loss_limit_usd}")
                 logger.info(f"  Score threshold: {self.cfg.ensemble.entry_score_threshold:.3f}")
+                logger.info(
+                    "  Even priority: %s",
+                    (
+                        "enabled "
+                        f"(ODD needs +{self.cfg.direction.odd_extra_threshold:.2f}, "
+                        f"EVEN bonus +{self.cfg.direction.even_score_bonus:.2f})"
+                        if self.cfg.direction.even_priority
+                        else "disabled"
+                    ),
+                )
                 logger.info(f"  Kelly sizing: {'enabled' if self.cfg.kelly.enabled else 'disabled'}")
-                if self.cfg.strategy == "ensemble":
-                    logger.info(
-                        f"  Require known regime: {'yes' if self.cfg.ensemble.require_known_regime else 'no'}"
-                    )
+                logger.info(
+                    f"  Require known regime: {'yes' if self.cfg.ensemble.require_known_regime else 'no'}"
+                )
                 logger.info(f"  Regime warmup: {self.cfg.hmm.lookback} returns per symbol")
                 if self.cfg.contract.duration_unit == "t":
                     logger.info(
@@ -991,6 +1047,23 @@ def main():
         action="store_true",
         help="Block entries until a symbol's regime is no longer UNKNOWN",
     )
+    parser.add_argument(
+        "--even-priority",
+        action="store_true",
+        help="Prefer DIGITEVEN trades and require a higher score for DIGITODD",
+    )
+    parser.add_argument(
+        "--odd-extra-threshold",
+        type=float,
+        default=0.12,
+        help="Extra score required for DIGITODD when --even-priority is enabled",
+    )
+    parser.add_argument(
+        "--even-score-bonus",
+        type=float,
+        default=0.05,
+        help="Ranking bonus added to DIGITEVEN when --even-priority is enabled",
+    )
     parser.add_argument("--score-threshold", type=float, default=0.60, help="Ensemble score threshold")
     parser.add_argument(
         "--strategy",
@@ -1036,6 +1109,9 @@ def main():
     cfg.contract.duration = args.duration
     cfg.ensemble.entry_score_threshold = args.score_threshold
     cfg.ensemble.require_known_regime = args.require_known_regime
+    cfg.direction.even_priority = args.even_priority
+    cfg.direction.odd_extra_threshold = args.odd_extra_threshold
+    cfg.direction.even_score_bonus = args.even_score_bonus
     cfg.kelly.enabled = not args.disable_kelly
     cfg.strategy = args.strategy
     cfg.pulse.fast_window = args.pulse_fast

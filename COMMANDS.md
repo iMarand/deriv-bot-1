@@ -3,7 +3,7 @@
 ## 1. 
 ```
 
-python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --strategy alphabloom --ab-window 40 --save-app-json data/trades-1.json
+python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --even-priority --odd-extra-threshold 0.35 --even-score-bonus 0.12 --strategy alphabloom --ab-window 40 --save-app-json data/trades-1.json
 
 ```
 
