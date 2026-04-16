@@ -13,6 +13,7 @@ import contextlib
 import json
 import logging
 import os
+import random
 import signal
 import time
 from pathlib import Path
@@ -81,11 +82,13 @@ class DerivBot:
         cfg: BotConfig | None = None,
         account_mode: str = "demo",
         save_app_json: Optional[str] = None,
+        disable_risk_engine: bool = False,
     ):
         self.token = token
         self.cfg = cfg or BotConfig()
         self.account_mode = account_mode
         self.save_app_json = Path(save_app_json).resolve() if save_app_json else None
+        self._disable_risk_engine = disable_risk_engine
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
         self._req_id = 0
@@ -100,6 +103,7 @@ class DerivBot:
         # Shared components
         self.scorer = EnsembleScorer(self.cfg.ensemble)
         self.martingale = MartingaleEngine(self.cfg.martingale)
+        self.martingale.disable_risk_engine = disable_risk_engine
         self.kelly = KellyCalculator(self.cfg.kelly)
         self.circuit_breaker = CircuitBreaker(self.cfg.circuit_breaker)
         self.index_selector = IndexSelector(self.cfg.index)
@@ -619,8 +623,9 @@ class DerivBot:
             return
 
         kf = self.kelly.kelly_fraction()
-        stake = self.martingale.next_stake(self.equity, kf)
-        stake = self.circuit_breaker.adjust_stake(stake)
+        stake = self.martingale.next_stake(self.equity, kf, skip_cooldown=self._disable_risk_engine)
+        if not self._disable_risk_engine:
+            stake = self.circuit_breaker.adjust_stake(stake)
         if stake <= 0:
             self._set_symbol_status(symbol, "stake skipped by risk engine")
             return
@@ -924,8 +929,11 @@ class DerivBot:
                     logger.info("  Pulse mode: dual-timeframe, trades when both agree")
                 logger.info(f"  Indices: {self.cfg.index.symbols}")
                 logger.info(f"  Base stake: ${self.cfg.martingale.base_stake_usd}")
-                logger.info(f"  Profit target: ${self.cfg.martingale.profit_target_usd}")
-                logger.info(f"  Loss limit: ${self.cfg.martingale.loss_limit_usd}")
+                logger.info(f"  Martingale multiplier: x{self.cfg.martingale.multiplier}")
+                pt = self.cfg.martingale.profit_target_usd
+                ll = self.cfg.martingale.loss_limit_usd
+                logger.info("  Profit target: %s", f"${pt}" if pt is not None else "unlimited")
+                logger.info("  Loss limit:    %s", f"${ll}" if ll is not None else "unlimited")
                 logger.info(f"  Score threshold: {self.cfg.ensemble.entry_score_threshold:.3f}")
                 logger.info(
                     "  Even priority: %s",
@@ -938,6 +946,7 @@ class DerivBot:
                     ),
                 )
                 logger.info(f"  Kelly sizing: {'enabled' if self.cfg.kelly.enabled else 'disabled'}")
+                logger.info(f"  Risk engine:  {'DISABLED (no cooldown, no circuit breaker)' if self._disable_risk_engine else 'enabled'}")
                 logger.info(
                     f"  Require known regime: {'yes' if self.cfg.ensemble.require_known_regime else 'no'}"
                 )
@@ -1018,9 +1027,9 @@ def main():
     )
     parser.add_argument("--app-id", type=int, default=1089, help="Deriv app_id")
     parser.add_argument("--base-stake", type=float, default=1.0, help="Base stake in USD")
-    parser.add_argument("--profit-target", type=float, default=100.0, help="Stop after this profit")
-    parser.add_argument("--loss-limit", type=float, default=-100.0, help="Stop after this loss")
-    parser.add_argument("--multiplier", type=float, default=2.0, help="Martingale multiplier")
+    parser.add_argument("--profit-target", type=float, default=None, help="Stop after reaching this net profit (omit to run forever)")
+    parser.add_argument("--loss-limit", type=float, default=None, help="Stop after hitting this net loss, e.g. -50 (omit to run forever)")
+    parser.add_argument("--martingale", type=float, default=2.0, help="Martingale multiplier on loss, e.g. 2.2")
     parser.add_argument("--max-losses", type=int, default=4, help="Max consecutive losses before reset")
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to trade")
     parser.add_argument("--duration", type=int, default=5, help="Contract duration (ticks)")
@@ -1031,16 +1040,14 @@ def main():
         help="Skip symbols whose expected contract time exceeds this limit",
     )
     parser.add_argument(
-        "--save-app-json",
-        nargs="?",
-        const="app_data.json",
-        default=None,
-        help="Write session and trade history JSON for app.html (default: app_data.json)",
-    )
-    parser.add_argument(
         "--disable-kelly",
         action="store_true",
         help="Disable Kelly sizing and use base stake plus Martingale only",
+    )
+    parser.add_argument(
+        "--disable-risk-engine",
+        action="store_true",
+        help="Disable circuit breaker and martingale cooldown — martingale progression continues uninterrupted",
     )
     parser.add_argument(
         "--require-known-regime",
@@ -1102,9 +1109,9 @@ def main():
     cfg = BotConfig()
     cfg.api.app_id = args.app_id
     cfg.martingale.base_stake_usd = args.base_stake
-    cfg.martingale.profit_target_usd = args.profit_target
-    cfg.martingale.loss_limit_usd = args.loss_limit
-    cfg.martingale.multiplier = args.multiplier
+    cfg.martingale.profit_target_usd = args.profit_target   # None = no stop
+    cfg.martingale.loss_limit_usd = args.loss_limit         # None = no stop
+    cfg.martingale.multiplier = args.martingale
     cfg.martingale.max_consecutive_losses = args.max_losses
     cfg.contract.duration = args.duration
     cfg.ensemble.entry_score_threshold = args.score_threshold
@@ -1142,12 +1149,18 @@ def main():
                 excluded_symbols,
             )
 
+    # Auto-generate session file in data/ folder
+    data_dir = Path(__file__).parent / "data"
+    session_file = data_dir / f"{random.randint(1000, 9999)}-trades.json"
+    logging.getLogger("deriv_bot").info("Session data → %s", session_file)
+
     # Create and run bot
     bot = DerivBot(
         token=args.token,
         cfg=cfg,
         account_mode=args.account_mode,
-        save_app_json=args.save_app_json,
+        save_app_json=str(session_file),
+        disable_risk_engine=args.disable_risk_engine,
     )
 
     # Graceful shutdown on Ctrl+C

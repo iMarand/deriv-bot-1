@@ -4,7 +4,7 @@ All tunable parameters in one place.
 """
 
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 @dataclass
@@ -63,8 +63,8 @@ class MartingaleConfig:
     max_consecutive_losses: int = 5       # increased from 4 — gives Martingale more room
     max_stake_usd: float = 50.0
     base_stake_usd: float = 1.0
-    profit_target_usd: float = 100.0   # stop bot after this net profit
-    loss_limit_usd: float = -100.0     # stop bot after this net loss
+    profit_target_usd: Optional[float] = None  # None = run forever (no profit stop)
+    loss_limit_usd: Optional[float] = None     # None = run forever (no loss stop)
     bankroll_fraction: float = 0.02    # max base stake as fraction of equity
 
 

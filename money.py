@@ -92,12 +92,13 @@ class MartingaleEngine:
         self._cooldown_remaining: int = 0
         self._start_equity: float = 1000.0  # updated on first stake call
         self.last_stake_reason: str = "base"
+        self.disable_risk_engine: bool = False  # set by DerivBot when --disable-risk-engine is passed
 
     @property
     def is_stopped(self) -> bool:
         return self._stopped
 
-    def next_stake(self, equity: float, kelly_fraction: Optional[float] = None) -> float:
+    def next_stake(self, equity: float, kelly_fraction: Optional[float] = None, skip_cooldown: bool = False) -> float:
         """Compute the next stake, respecting all caps."""
         if self._stopped:
             return 0.0
@@ -105,8 +106,9 @@ class MartingaleEngine:
         # Cooldown: after a max-loss streak reset, wait before trading again
         if self._cooldown_remaining > 0:
             self._cooldown_remaining -= 1
-            self.last_stake_reason = "cooldown"
-            return 0.0  # skip this trade
+            if not skip_cooldown:
+                self.last_stake_reason = "cooldown"
+                return 0.0  # skip this trade
 
         # Kelly-informed base
         base = self.cfg.base_stake_usd
@@ -121,8 +123,9 @@ class MartingaleEngine:
         base = min(base, max_base)
 
         # Adaptive Martingale: softer multiplier after repeated resets
+        # (bypassed when risk engine is disabled — multiplier stays fixed at cfg value)
         effective_mult = self.cfg.multiplier
-        if self._total_resets >= 2:
+        if not self.disable_risk_engine and self._total_resets >= 2:
             # Reduce aggression: drop multiplier toward 1.5 after multiple resets
             effective_mult = max(1.5, self.cfg.multiplier - 0.1 * self._total_resets)
 
@@ -140,23 +143,24 @@ class MartingaleEngine:
         stake = min(stake, equity * 0.25)  # tightened from 50% to 25%
 
         # Never allow a single stake to push net P/L past the configured loss limit.
-        remaining_loss_room = self.net_pnl - self.cfg.loss_limit_usd
-        if remaining_loss_room <= 0:
-            logger.warning("Loss room exhausted before new trade; stopping")
-            self._stopped = True
-            self.last_stake_reason = "loss-room-exhausted"
-            return 0.0
-        if remaining_loss_room < 0.35:
-            logger.warning(
-                "Remaining loss room $%.2f is below minimum stake; stopping",
-                remaining_loss_room,
-            )
-            self._stopped = True
-            self.last_stake_reason = "loss-room-below-minimum"
-            return 0.0
-        if stake > remaining_loss_room:
-            stake = remaining_loss_room
-            sizing_mode = f"{sizing_mode}+loss-cap"
+        if self.cfg.loss_limit_usd is not None:
+            remaining_loss_room = self.net_pnl - self.cfg.loss_limit_usd
+            if remaining_loss_room <= 0:
+                logger.warning("Loss room exhausted before new trade; stopping")
+                self._stopped = True
+                self.last_stake_reason = "loss-room-exhausted"
+                return 0.0
+            if remaining_loss_room < 0.35:
+                logger.warning(
+                    "Remaining loss room $%.2f is below minimum stake; stopping",
+                    remaining_loss_room,
+                )
+                self._stopped = True
+                self.last_stake_reason = "loss-room-below-minimum"
+                return 0.0
+            if stake > remaining_loss_room:
+                stake = remaining_loss_room
+                sizing_mode = f"{sizing_mode}+loss-cap"
 
         stake = max(stake, 0.35)           # Deriv minimum ~$0.35
         self.last_stake_reason = sizing_mode
@@ -174,20 +178,26 @@ class MartingaleEngine:
             self.consecutive_losses += 1
             if self.consecutive_losses >= self.cfg.max_consecutive_losses:
                 self._total_resets += 1
-                # Exponential cooldown: wait longer after each reset
-                self._cooldown_remaining = min(3 * self._total_resets, 15)
-                logger.warning(
-                    f"Max consecutive losses ({self.cfg.max_consecutive_losses}) hit — "
-                    f"reset #{self._total_resets}, cooldown {self._cooldown_remaining} ticks"
-                )
-                self.consecutive_losses = 0
-                self.current_stake = self.cfg.base_stake_usd
+                if not self.disable_risk_engine:
+                    # Exponential cooldown: wait longer after each reset
+                    self._cooldown_remaining = min(3 * self._total_resets, 15)
+                    logger.warning(
+                        f"Max consecutive losses ({self.cfg.max_consecutive_losses}) hit — "
+                        f"reset #{self._total_resets}, cooldown {self._cooldown_remaining} ticks"
+                    )
+                    self.consecutive_losses = 0
+                    self.current_stake = self.cfg.base_stake_usd
+                else:
+                    logger.warning(
+                        f"Max consecutive losses ({self.cfg.max_consecutive_losses}) hit — "
+                        f"risk engine disabled, martingale continues (streak={self.consecutive_losses})"
+                    )
 
-        # Profit/loss stop
-        if self.net_pnl >= self.cfg.profit_target_usd:
+        # Profit/loss stop (only when limits are configured)
+        if self.cfg.profit_target_usd is not None and self.net_pnl >= self.cfg.profit_target_usd:
             logger.info(f"Profit target reached: ${self.net_pnl:.2f}")
             self._stopped = True
-        if self.net_pnl <= self.cfg.loss_limit_usd:
+        if self.cfg.loss_limit_usd is not None and self.net_pnl <= self.cfg.loss_limit_usd:
             logger.warning(f"Loss limit reached: ${self.net_pnl:.2f}")
             self._stopped = True
 
@@ -202,7 +212,7 @@ class MartingaleEngine:
     @property
     def max_rounds_to_ruin(self) -> float:
         """Theoretical max consecutive losses before loss limit (log formula)."""
-        if self.cfg.multiplier <= 1:
+        if self.cfg.multiplier <= 1 or self.cfg.loss_limit_usd is None:
             return float("inf")
         limit = abs(self.cfg.loss_limit_usd)
         return math.log(limit / self.cfg.base_stake_usd) / math.log(self.cfg.multiplier)

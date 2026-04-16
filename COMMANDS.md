@@ -21,6 +21,9 @@ python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --pro
 
 python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --profit-target 50 --loss-limit -30 --score-threshold 0.60 --disable-kelly --strategy ensemble --ab-window 40 --save-app-json data/trades-1.json
 
+
+python bot.py --token YOUR_TOKEN_HERE --account-mode demo --base-stake 1.0 --score-threshold 0.60 --disable-kelly --strategy ensemble --ab-window 40
+
 ```
 
 
