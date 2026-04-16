@@ -875,7 +875,10 @@ function buildParams() {
 
 function updateCmd() {
   const p = buildParams();
-  const tokenDisplay = p.token ? p.token : '[default]';
+  const rawToken = p.token || '[default]';
+  const tokenDisplay = rawToken.length > 5
+    ? rawToken.slice(0, 3) + '*'.repeat(rawToken.length - 5) + rawToken.slice(-2)
+    : rawToken;
   let cmd = `python3 bot.py --token <span>${tokenDisplay}</span> --account-mode ${p.mode}`;
   cmd += ` --base-stake ${p.base_stake.toFixed(2)} --martingale ${p.martingale.toFixed(1)}`;
   cmd += ` --score-threshold ${p.threshold.toFixed(2)} --strategy ${p.strategy}`;
