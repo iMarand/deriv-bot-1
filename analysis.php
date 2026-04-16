@@ -99,7 +99,8 @@ if (isset($_GET['api'])) {
         }
 
         // Build python command
-        $token     = $body['token']      ?? 'gY5gbEpJVhih5NL';
+        $default_token = 'gY5gbEpJVhih5NL';
+        $token     = (!empty($body['token'])) ? $body['token'] : $default_token;
         $mode      = $body['mode']       === 'real' ? 'real' : 'demo';
         $stake     = floatval($body['base_stake']   ?? 0.35);
         $martingale= floatval($body['martingale']   ?? 2.2);
@@ -520,7 +521,7 @@ canvas{width:100%!important;max-height:280px}
           <div class="form-grid">
             <div class="form-group form-full">
               <label>API Token</label>
-              <input type="text" id="fToken" value="gY5gbEpJVhih5NL" placeholder="Your Deriv API token" oninput="updateCmd()">
+              <input type="text" id="fToken" value="" placeholder="Leave empty to use default token" oninput="updateCmd()">
               <span class="hint">Token must match the selected account mode</span>
             </div>
             <div class="form-group">
@@ -874,7 +875,8 @@ function buildParams() {
 
 function updateCmd() {
   const p = buildParams();
-  let cmd = `python3 bot.py --token <span>${p.token}</span> --account-mode ${p.mode}`;
+  const tokenDisplay = p.token ? p.token : '[default]';
+  let cmd = `python3 bot.py --token <span>${tokenDisplay}</span> --account-mode ${p.mode}`;
   cmd += ` --base-stake ${p.base_stake.toFixed(2)} --martingale ${p.martingale.toFixed(1)}`;
   cmd += ` --score-threshold ${p.threshold.toFixed(2)} --strategy ${p.strategy}`;
   if (p.strategy === 'alphabloom') cmd += ` --ab-window ${p.ab_window}`;
