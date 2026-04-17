@@ -1029,7 +1029,8 @@ def main():
     parser.add_argument("--base-stake", type=float, default=1.0, help="Base stake in USD")
     parser.add_argument("--profit-target", type=float, default=None, help="Stop after reaching this net profit (omit to run forever)")
     parser.add_argument("--loss-limit", type=float, default=None, help="Stop after hitting this net loss, e.g. -50 (omit to run forever)")
-    parser.add_argument("--martingale", type=float, default=2.0, help="Martingale multiplier on loss, e.g. 2.2")
+    parser.add_argument("--martingale", type=float, default=2.0, help="Martingale multiplier on loss, e.g. 2.0")
+    parser.add_argument("--max-stake", type=float, default=50.0, help="Maximum stake per trade in USD (caps Martingale escalation)")
     parser.add_argument("--max-losses", type=int, default=4, help="Max consecutive losses before reset")
     parser.add_argument("--symbols", nargs="+", default=None, help="Symbols to trade")
     parser.add_argument("--duration", type=int, default=5, help="Contract duration (ticks)")
@@ -1112,6 +1113,7 @@ def main():
     cfg.martingale.profit_target_usd = args.profit_target   # None = no stop
     cfg.martingale.loss_limit_usd = args.loss_limit         # None = no stop
     cfg.martingale.multiplier = args.martingale
+    cfg.martingale.max_stake_usd = args.max_stake
     cfg.martingale.max_consecutive_losses = args.max_losses
     cfg.contract.duration = args.duration
     cfg.ensemble.entry_score_threshold = args.score_threshold

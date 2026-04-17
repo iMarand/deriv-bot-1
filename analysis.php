@@ -52,7 +52,7 @@ if (isset($_GET['api'])) {
                 'losses'         => $sum['losses'] ?? 0,
                 'net_pnl'        => $sum['net_pnl'] ?? 0,
                 'win_rate'       => $sum['win_rate'] ?? 0,
-                'is_live'        => ($sess['active_contract'] !== null),
+                'is_live'        => ((time() - filemtime($f)) < 120),
             ];
         }
         usort($sessions, fn($a,$b) => ($b['started_at']??0) <=> ($a['started_at']??0));
@@ -104,6 +104,7 @@ if (isset($_GET['api'])) {
         $mode      = $body['mode']       === 'real' ? 'real' : 'demo';
         $stake     = floatval($body['base_stake']   ?? 0.35);
         $martingale= floatval($body['martingale']   ?? 2.2);
+        $maxStake  = floatval($body['max_stake']    ?? 50.0);
         $threshold = floatval($body['threshold']    ?? 0.60);
         $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble'])
                      ? $body['strategy'] : 'alphabloom';
@@ -116,8 +117,8 @@ if (isset($_GET['api'])) {
                      ? floatval($body['loss_limit']) : null;
 
         $cmd = sprintf(
-            "python3 bot.py --token %s --account-mode %s --base-stake %.2f --martingale %.2f --score-threshold %.2f --strategy %s",
-            escapeshellarg($token), $mode, $stake, $martingale, $threshold, $strategy
+            "python3 bot.py --token %s --account-mode %s --base-stake %.2f --martingale %.2f --max-stake %.2f --score-threshold %.2f --strategy %s",
+            escapeshellarg($token), $mode, $stake, $martingale, $maxStake, $threshold, $strategy
         );
         if ($strategy === 'alphabloom') $cmd .= " --ab-window $abWindow";
         if ($disKelly)  $cmd .= " --disable-kelly";
@@ -535,6 +536,11 @@ canvas{width:100%!important;max-height:280px}
               <span class="hint">Multiply stake on each loss</span>
             </div>
             <div class="form-group">
+              <label>Max Stake (USD)</label>
+              <input type="number" id="fMaxStake" value="50" step="1" min="1" oninput="updateCmd()">
+              <span class="hint" id="hMaxStake">Covers up to 7 consecutive losses</span>
+            </div>
+            <div class="form-group">
               <label>Score Threshold</label>
               <input type="number" id="fThreshold" value="0.60" step="0.01" min="0" max="1" oninput="updateCmd()">
               <span class="hint">Min signal confidence (0–1)</span>
@@ -859,6 +865,7 @@ function buildParams() {
   const token     = document.getElementById('fToken').value.trim() || 'gY5gbEpJVhih5NL';
   const stake     = parseFloat(document.getElementById('fStake').value) || 0.35;
   const mart      = parseFloat(document.getElementById('fMartingale').value) || 2.2;
+  const maxStake  = parseFloat(document.getElementById('fMaxStake').value) || 50;
   const thr       = parseFloat(document.getElementById('fThreshold').value) || 0.60;
   const strategy  = document.getElementById('fStrategy').value;
   const abWindow  = parseInt(document.getElementById('fAbWindow').value) || 60;
@@ -868,9 +875,9 @@ function buildParams() {
   const lossRaw   = document.getElementById('fLoss').value.trim();
   const profit    = profitRaw !== '' ? parseFloat(profitRaw) : null;
   const loss      = lossRaw  !== '' ? parseFloat(lossRaw)  : null;
-  return { token, mode:currentMode, base_stake:stake, martingale:mart, threshold:thr,
-           strategy, ab_window:abWindow, disable_kelly:disKelly, disable_risk:disRisk,
-           profit_target:profit, loss_limit:loss };
+  return { token, mode:currentMode, base_stake:stake, martingale:mart, max_stake:maxStake,
+           threshold:thr, strategy, ab_window:abWindow, disable_kelly:disKelly,
+           disable_risk:disRisk, profit_target:profit, loss_limit:loss };
 }
 
 function updateCmd() {
@@ -879,8 +886,16 @@ function updateCmd() {
   const tokenDisplay = rawToken.length > 5
     ? rawToken.slice(0, 3) + '*'.repeat(rawToken.length - 5) + rawToken.slice(-2)
     : rawToken;
+  // Dynamic hint: max recoverable consecutive losses given current settings
+  const hintLevels = p.martingale > 1
+    ? Math.floor(Math.log(p.max_stake / p.base_stake) / Math.log(p.martingale))
+    : '∞';
+  const hintEl = document.getElementById('hMaxStake');
+  if (hintEl) hintEl.textContent = `Covers up to ${hintLevels} consecutive losses`;
+
   let cmd = `python3 bot.py --token <span>${tokenDisplay}</span> --account-mode ${p.mode}`;
   cmd += ` --base-stake ${p.base_stake.toFixed(2)} --martingale ${p.martingale.toFixed(1)}`;
+  cmd += ` --max-stake ${p.max_stake.toFixed(0)}`;
   cmd += ` --score-threshold ${p.threshold.toFixed(2)} --strategy ${p.strategy}`;
   if (p.strategy === 'alphabloom') cmd += ` --ab-window ${p.ab_window}`;
   if (p.disable_kelly)  cmd += ' --disable-kelly';
