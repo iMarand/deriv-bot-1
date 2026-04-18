@@ -35,6 +35,8 @@ from money import (
 )
 from index_selector import IndexSelector
 from filters import TimeFilter, ShadowTrader, ShadowTrade
+from adaptive import VolatilityGate, VolatilityGateConfig, evaluate_gates
+from hotness import HotnessTracker
 
 logger = logging.getLogger("deriv_bot")
 
@@ -83,6 +85,9 @@ class DerivBot:
         account_mode: str = "demo",
         save_app_json: Optional[str] = None,
         disable_risk_engine: bool = False,
+        ml_filter=None,
+        hotness_tracker=None,
+        vol_gate: Optional[VolatilityGate] = None,
     ):
         self.token = token
         self.cfg = cfg or BotConfig()
@@ -109,6 +114,11 @@ class DerivBot:
         self.index_selector = IndexSelector(self.cfg.index)
         self.time_filter = TimeFilter(self.cfg.time_filter)
         self.shadow = ShadowTrader(self.cfg.shadow)
+
+        # Optional adaptive gates (any may be None)
+        self.ml_filter = ml_filter
+        self.hotness_tracker = hotness_tracker
+        self.vol_gate = vol_gate
 
         # State
         self.equity: float = 0.0
@@ -444,6 +454,9 @@ class DerivBot:
             return self._process_tick_alphabloom(symbol, ab, rd)
         elif strategy == "pulse":
             return self._process_tick_pulse(symbol, ps, rd)
+        elif strategy == "adaptive":
+            # Adaptive reuses pulse's scan/selection, then bot-level gates filter.
+            return self._process_tick_pulse(symbol, ps, rd)
         else:
             return self._process_tick_ensemble(symbol, dt, vt, rd)
 
@@ -605,6 +618,31 @@ class DerivBot:
         )
         return (symbol, signal)
 
+    def _gates_accept(self, symbol: str, signal: SignalSnapshot) -> bool:
+        """Consult optional ML / hotness / volatility gates. Returns True when
+        no gate is active OR all active gates accept. Writes a human-readable
+        status on rejection so the reason is visible in the dashboard.
+        """
+        if self.ml_filter is None and self.hotness_tracker is None and self.vol_gate is None:
+            return True
+
+        contract_type = f"DIGIT{signal.direction}"
+        vt = self._vol_trackers.get(symbol)
+        decision = evaluate_gates(
+            symbol, contract_type, time.time(),
+            ml_filter=self.ml_filter,
+            hotness=self.hotness_tracker,
+            vol_gate=self.vol_gate,
+            vt=vt,
+        )
+        if not decision.accept:
+            self._set_symbol_status(symbol, decision.reason, signal.composite_score)
+            logger.info(
+                "GATE SKIP %s %s score=%.3f — %s",
+                symbol, signal.direction, signal.composite_score, decision.reason,
+            )
+        return decision.accept
+
     async def _request_proposal(self, symbol: str, signal: SignalSnapshot) -> None:
         contract_type = f"DIGIT{signal.direction}"
         threshold = self._direction_threshold(signal)
@@ -759,6 +797,11 @@ class DerivBot:
         self.equity = float(contract_data.get("balance_after") or (self.equity + profit))
         self.circuit_breaker.update(self.equity)
         self.time_filter.record(time.time(), is_win)
+        # Adaptive gates: feed result so rolling WR and ML feature-state stay current
+        if self.hotness_tracker is not None:
+            self.hotness_tracker.on_trade_result(symbol, is_win)
+        if self.ml_filter is not None:
+            self.ml_filter.on_trade_result(symbol, contract_type, trade.timestamp, is_win)
         self._trade_count += 1
         self._write_app_json()
 
@@ -864,7 +907,8 @@ class DerivBot:
                     best = self.index_selector.best(trackers, regimes)
                     if best and best.symbol == symbol:
                         self._last_best_symbol = best.symbol
-                        await self._request_proposal(symbol, signal)
+                        if self._gates_accept(symbol, signal):
+                            await self._request_proposal(symbol, signal)
                     elif best:
                         self._last_best_symbol = best.symbol
                         self._set_symbol_status(
@@ -874,7 +918,8 @@ class DerivBot:
                         )
                 else:
                     self._last_best_symbol = symbol
-                    await self._request_proposal(symbol, signal)
+                    if self._gates_accept(symbol, signal):
+                        await self._request_proposal(symbol, signal)
             self._maybe_log_status()
 
         elif msg_type == "proposal":
@@ -1075,9 +1120,38 @@ def main():
     parser.add_argument("--score-threshold", type=float, default=0.60, help="Ensemble score threshold")
     parser.add_argument(
         "--strategy",
-        choices=("ensemble", "alphabloom", "pulse"),
+        choices=("ensemble", "alphabloom", "pulse", "adaptive"),
         default="ensemble",
-        help="Trading strategy: 'ensemble', 'alphabloom', or 'pulse' (dual-timeframe)",
+        help="Trading strategy: 'ensemble', 'alphabloom', 'pulse', or 'adaptive' (pulse + ML/hotness/vol gates)",
+    )
+    parser.add_argument(
+        "--ml-filter",
+        action="store_true",
+        help="Gate candidate trades through the trained ML filter (data/ml_filter.pkl).",
+    )
+    parser.add_argument(
+        "--ml-model", type=str, default="data/ml_filter.pkl",
+        help="Path to trained ML model pickle",
+    )
+    parser.add_argument(
+        "--ml-threshold", type=float, default=None,
+        help="P(win) cutoff override (default: value baked into the model)",
+    )
+    parser.add_argument(
+        "--hotness-window", type=int, default=50,
+        help="Adaptive: rolling window for per-symbol WR (default 50)",
+    )
+    parser.add_argument(
+        "--hotness-cold", type=float, default=0.48,
+        help="Adaptive: skip symbols whose rolling WR is below this (default 0.48)",
+    )
+    parser.add_argument(
+        "--vol-skip-pct", type=float, default=0.75,
+        help="Adaptive: skip when ATR percentile >= this (default 0.75 = skip top 25%%)",
+    )
+    parser.add_argument(
+        "--disable-vol-gate", action="store_true",
+        help="Adaptive: disable the volatility-regime gate",
     )
     parser.add_argument(
         "--ab-window", type=int, default=60,
@@ -1156,6 +1230,29 @@ def main():
     session_file = data_dir / f"{random.randint(1000, 9999)}-trades.json"
     logging.getLogger("deriv_bot").info("Session data → %s", session_file)
 
+    # Optional adaptive gates — only built when --strategy adaptive or --ml-filter is set
+    ml_filter_instance = None
+    hotness_instance = None
+    vol_gate_instance = None
+    if args.strategy == "adaptive" or args.ml_filter:
+        if args.ml_filter or args.strategy == "adaptive":
+            from ml_filter import MLFilter
+            try:
+                ml_filter_instance = MLFilter(args.ml_model, threshold=args.ml_threshold)
+            except FileNotFoundError as e:
+                logging.getLogger("deriv_bot").warning(
+                    "ML filter unavailable: %s  (continuing without ML gate)", e,
+                )
+    if args.strategy == "adaptive":
+        hotness_instance = HotnessTracker(
+            window=args.hotness_window,
+            cold_threshold=args.hotness_cold,
+        )
+        vol_gate_instance = VolatilityGate(VolatilityGateConfig(
+            enabled=not args.disable_vol_gate,
+            skip_above=args.vol_skip_pct,
+        ))
+
     # Create and run bot
     bot = DerivBot(
         token=args.token,
@@ -1163,6 +1260,9 @@ def main():
         account_mode=args.account_mode,
         save_app_json=str(session_file),
         disable_risk_engine=args.disable_risk_engine,
+        ml_filter=ml_filter_instance,
+        hotness_tracker=hotness_instance,
+        vol_gate=vol_gate_instance,
     )
 
     # Graceful shutdown on Ctrl+C

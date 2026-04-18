@@ -106,11 +106,16 @@ if (isset($_GET['api'])) {
         $martingale= floatval($body['martingale']   ?? 2.2);
         $maxStake  = floatval($body['max_stake']    ?? 50.0);
         $threshold = floatval($body['threshold']    ?? 0.60);
-        $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble'])
+        $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble','adaptive'])
                      ? $body['strategy'] : 'alphabloom';
         $abWindow  = intval($body['ab_window'] ?? 60);
         $disKelly  = !empty($body['disable_kelly']);
         $disRisk   = !empty($body['disable_risk']);
+        $mlOn      = !empty($body['ml_filter']);
+        $mlThr     = isset($body['ml_threshold']) && $body['ml_threshold'] !== '' && $body['ml_threshold'] !== null
+                     ? floatval($body['ml_threshold']) : null;
+        $hotCold   = floatval($body['hotness_cold'] ?? 0.48);
+        $volSkip   = floatval($body['vol_skip_pct'] ?? 0.75);
         $profitTgt = isset($body['profit_target']) && $body['profit_target'] !== '' && $body['profit_target'] !== null
                      ? floatval($body['profit_target']) : null;
         $lossLim   = isset($body['loss_limit']) && $body['loss_limit'] !== '' && $body['loss_limit'] !== null
@@ -123,6 +128,13 @@ if (isset($_GET['api'])) {
         if ($strategy === 'alphabloom') $cmd .= " --ab-window $abWindow";
         if ($disKelly)  $cmd .= " --disable-kelly";
         if ($disRisk)   $cmd .= " --disable-risk-engine";
+        if ($mlOn && $strategy !== 'adaptive') $cmd .= " --ml-filter";
+        if (($mlOn || $strategy === 'adaptive') && $mlThr !== null) {
+            $cmd .= sprintf(" --ml-threshold %.2f", $mlThr);
+        }
+        if ($strategy === 'adaptive') {
+            $cmd .= sprintf(" --hotness-cold %.2f --vol-skip-pct %.2f", $hotCold, $volSkip);
+        }
         if ($profitTgt !== null) $cmd .= sprintf(" --profit-target %.2f", $profitTgt);
         if ($lossLim   !== null) $cmd .= sprintf(" --loss-limit %.2f", $lossLim);
 
@@ -163,6 +175,107 @@ if (isset($_GET['api'])) {
         usleep(1500000);
         exec("tmux kill-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1");
         echo json_encode(['success'=>true]);
+        exit;
+    }
+
+    // ── list json files that contain a trades[] array (training candidates) ───
+    if ($_GET['api'] === 'ml_files') {
+        $files = glob($DATA_DIR . '/*.json') ?: [];
+        $out = [];
+        foreach ($files as $f) {
+            $name = basename($f);
+            if ($name === 'ml_filter.json') continue;
+            $raw = @file_get_contents($f);
+            if (!$raw) continue;
+            $d = json_decode($raw, true);
+            if (!is_array($d)) continue;
+            $trades = $d['trades'] ?? null;
+            if (!is_array($trades) || !count($trades)) continue;
+            $labeled = 0;
+            foreach ($trades as $t) {
+                if (!isset($t['symbol'], $t['contract_type'], $t['result'])) continue;
+                $labeled++;
+            }
+            if (!$labeled) continue;
+            $out[] = [
+                'file'       => $name,
+                'trades'     => count($trades),
+                'labeled'    => $labeled,
+                'mtime'      => filemtime($f),
+                'bytes'      => filesize($f),
+            ];
+        }
+        usort($out, fn($a,$b) => $b['mtime'] <=> $a['mtime']);
+        echo json_encode($out);
+        exit;
+    }
+
+    // ── ml model status ───────────────────────────────────────────────────────
+    if ($_GET['api'] === 'ml_model_status') {
+        $pkl  = $DATA_DIR . '/ml_filter.pkl';
+        $meta = $DATA_DIR . '/ml_filter.json';
+        if (!file_exists($pkl)) {
+            echo json_encode(['trained' => false]);
+            exit;
+        }
+        $resp = ['trained' => true, 'pkl_mtime' => filemtime($pkl), 'pkl_bytes' => filesize($pkl)];
+        if (file_exists($meta)) {
+            $m = json_decode(@file_get_contents($meta), true);
+            if (is_array($m)) $resp['meta'] = $m;
+        }
+        echo json_encode($resp);
+        exit;
+    }
+
+    // ── ml train (POST) ───────────────────────────────────────────────────────
+    if ($_GET['api'] === 'ml_train' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $model    = in_array($body['model'] ?? '', ['logreg','gbm']) ? $body['model'] : 'logreg';
+        $thr      = floatval($body['threshold'] ?? 0.50);
+        $testFrac = floatval($body['test_frac'] ?? 0.20);
+        $minTr    = intval($body['min_trades']  ?? 300);
+        $incRaw   = $body['include'] ?? [];
+        $include  = [];
+        if (is_array($incRaw)) {
+            foreach ($incRaw as $name) {
+                $b = basename((string)$name);
+                if (preg_match('/^[A-Za-z0-9._-]+\.json$/', $b) && $b !== 'ml_filter.json') {
+                    $include[] = $b;
+                }
+            }
+        }
+        if ($thr < 0 || $thr > 1) { http_response_code(400); echo json_encode(['error'=>'threshold out of range']); exit; }
+        if ($testFrac <= 0 || $testFrac >= 1) { http_response_code(400); echo json_encode(['error'=>'test_frac out of range']); exit; }
+
+        $cmd = sprintf(
+            "cd %s && python3 train_filter.py --model %s --threshold %.3f --test-frac %.3f --min-trades %d",
+            escapeshellarg($BOT_DIR), escapeshellarg($model), $thr, $testFrac, $minTr
+        );
+        if ($include) {
+            $cmd .= ' --include ' . escapeshellarg(implode(',', $include));
+        }
+        $cmd .= ' 2>&1';
+
+        $t0 = microtime(true);
+        $output = [];
+        $ret = -1;
+        exec($cmd, $output, $ret);
+        $elapsed = microtime(true) - $t0;
+
+        $meta = null;
+        $metaPath = $DATA_DIR . '/ml_filter.json';
+        if ($ret === 0 && file_exists($metaPath)) {
+            $meta = json_decode(@file_get_contents($metaPath), true);
+        }
+
+        echo json_encode([
+            'success'     => $ret === 0,
+            'return_code' => $ret,
+            'elapsed_sec' => round($elapsed, 2),
+            'command'     => $cmd,
+            'output'      => implode("\n", $output),
+            'meta'        => $meta,
+        ]);
         exit;
     }
 
@@ -381,6 +494,33 @@ canvas{width:100%!important;max-height:280px}
 .log-output{background:#000;border-radius:var(--radius-sm);padding:14px;font-family:var(--mono);font-size:.72rem;color:var(--green);line-height:1.65;max-height:420px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
 .log-output.empty{color:var(--text3);font-style:italic}
 
+/* ── ML TRAINING ── */
+.ml-status{display:flex;align-items:center;gap:14px;margin-bottom:18px;padding:12px 14px;background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm)}
+.ml-status-dot{width:12px;height:12px;border-radius:50%;flex-shrink:0}
+.ml-status-dot.trained{background:var(--green);box-shadow:0 0 6px var(--green)}
+.ml-status-dot.untrained{background:var(--red)}
+.ml-status-text{font-family:var(--mono);font-size:.78rem;color:var(--text)}
+.ml-status-text .muted{color:var(--text3);font-size:.7rem}
+.ml-meta-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(130px,1fr));gap:10px;margin-bottom:14px}
+.ml-meta-item{background:var(--bg3);border:1px solid var(--border);border-radius:var(--radius-sm);padding:8px 10px}
+.ml-meta-item .lbl{font-size:.62rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:3px}
+.ml-meta-item .val{font-family:var(--mono);font-size:.85rem;font-weight:600;color:var(--text)}
+.file-list{max-height:180px;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius-sm);padding:4px}
+.file-item{display:flex;align-items:center;gap:8px;padding:6px 8px;font-size:.78rem;border-radius:4px;cursor:pointer}
+.file-item:hover{background:var(--bg3)}
+.file-item input{accent-color:var(--green);cursor:pointer}
+.file-item .fname{font-family:var(--mono);color:var(--text)}
+.file-item .fmeta{margin-left:auto;font-family:var(--mono);font-size:.68rem;color:var(--text3)}
+.ml-select-row{display:flex;gap:8px;margin-bottom:6px}
+.ml-select-row button{font-size:.7rem;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer}
+.ml-select-row button:hover{background:var(--bg4);color:var(--text)}
+.ml-output{background:#000;border-radius:var(--radius-sm);padding:12px;font-family:var(--mono);font-size:.72rem;color:var(--green);line-height:1.6;max-height:360px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;margin-top:14px}
+.ml-output.empty{color:var(--text3);font-style:italic}
+.ml-thr-table{width:100%;border-collapse:collapse;margin-top:10px;font-family:var(--mono);font-size:.74rem}
+.ml-thr-table th,.ml-thr-table td{padding:6px 10px;text-align:right;border-bottom:1px solid var(--border)}
+.ml-thr-table th{text-align:right;color:var(--text3);font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
+.ml-thr-table th:first-child,.ml-thr-table td:first-child{text-align:left}
+
 /* ── MISC ── */
 ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:var(--border2)}
 .spinner{width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .6s linear infinite;display:inline-block}
@@ -427,6 +567,9 @@ canvas{width:100%!important;max-height:280px}
     </button>
     <button class="tab-btn" data-tab="control" onclick="switchTab('control')">
       &#129302; Bot Control <span class="tab-dot off" id="tabDot"></span>
+    </button>
+    <button class="tab-btn" data-tab="training" onclick="switchTab('training')">
+      &#129504; ML Training <span class="tab-dot off" id="mlDot"></span>
     </button>
   </div>
 
@@ -551,7 +694,23 @@ canvas{width:100%!important;max-height:280px}
                 <option value="alphabloom" selected>AlphaBloom</option>
                 <option value="pulse">Pulse (dual-timeframe)</option>
                 <option value="ensemble">Ensemble</option>
+                <option value="adaptive">Adaptive (Pulse + ML + hotness + vol)</option>
               </select>
+            </div>
+            <div class="form-group" id="mlThresholdGroup" style="display:none">
+              <label>ML Threshold</label>
+              <input type="number" id="fMlThreshold" value="0.50" step="0.01" min="0" max="1" oninput="updateCmd()">
+              <span class="hint">P(win) cutoff — higher = fewer, better trades</span>
+            </div>
+            <div class="form-group" id="hotnessColdGroup" style="display:none">
+              <label>Hotness Cold Cutoff</label>
+              <input type="number" id="fHotnessCold" value="0.48" step="0.01" min="0" max="1" oninput="updateCmd()">
+              <span class="hint">Skip symbols with rolling WR below this</span>
+            </div>
+            <div class="form-group" id="volSkipGroup" style="display:none">
+              <label>Vol Skip Percentile</label>
+              <input type="number" id="fVolSkip" value="0.75" step="0.05" min="0" max="1" oninput="updateCmd()">
+              <span class="hint">Skip when ATR percentile ≥ this (0.75 = top 25%)</span>
             </div>
             <div class="form-group" id="abWindowGroup">
               <label>AB Window (ticks)</label>
@@ -586,6 +745,13 @@ canvas{width:100%!important;max-height:280px}
               </div>
               <label class="toggle"><input type="checkbox" id="tRisk" onchange="updateCmd()"><span class="toggle-slider"></span></label>
             </div>
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label">ML Filter</div>
+                <div class="toggle-sub">Gate trades by trained P(win) model (data/ml_filter.pkl)</div>
+              </div>
+              <label class="toggle"><input type="checkbox" id="tMl" onchange="updateCmd()"><span class="toggle-slider"></span></label>
+            </div>
           </div>
 
           <!-- Command preview -->
@@ -610,6 +776,85 @@ canvas{width:100%!important;max-height:280px}
     </div><!-- /control-wrap -->
   </div><!-- /tab-control -->
 
+  <!-- ════════════════════════ TAB: ML TRAINING ════════════════════════ -->
+  <div class="tab-content" id="tab-training">
+    <div class="control-wrap">
+
+      <!-- LEFT: Status + Training form -->
+      <div>
+        <div class="ctrl-box" style="margin-bottom:16px">
+          <h3>&#129504; Model Status</h3>
+          <div class="ml-status" id="mlStatus">
+            <div class="ml-status-dot untrained"></div>
+            <div class="ml-status-text">Checking… <span class="muted">data/ml_filter.pkl</span></div>
+          </div>
+          <div class="ml-meta-grid" id="mlMetaGrid" style="display:none"></div>
+          <div id="mlThresholdsWrap" style="display:none">
+            <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);font-weight:600;margin-top:10px">Threshold Performance (Test Set)</div>
+            <table class="ml-thr-table" id="mlThrTable"></table>
+          </div>
+        </div>
+
+        <div class="ctrl-box">
+          <h3>&#9881; Train New Model</h3>
+          <div class="form-grid">
+            <div class="form-group">
+              <label>Model Type</label>
+              <select id="fMlModel">
+                <option value="logreg" selected>Logistic Regression (robust)</option>
+                <option value="gbm">Gradient Boosting (higher variance)</option>
+              </select>
+              <span class="hint">logreg generalizes better on small data</span>
+            </div>
+            <div class="form-group">
+              <label>Threshold</label>
+              <input type="number" id="fMlTrainThreshold" value="0.50" step="0.01" min="0" max="1">
+              <span class="hint">Baked into model (overridable at runtime)</span>
+            </div>
+            <div class="form-group">
+              <label>Test Fraction</label>
+              <input type="number" id="fMlTestFrac" value="0.20" step="0.05" min="0.05" max="0.5">
+              <span class="hint">Time-based split held out for evaluation</span>
+            </div>
+            <div class="form-group">
+              <label>Min Trades</label>
+              <input type="number" id="fMlMinTrades" value="300" step="50" min="50">
+              <span class="hint">Fail if fewer labeled trades available</span>
+            </div>
+          </div>
+
+          <div style="margin-top:16px">
+            <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);font-weight:600;margin-bottom:6px">
+              Training Data <span id="mlFileCount" style="color:var(--text3);font-weight:400"></span>
+            </div>
+            <div class="ml-select-row">
+              <button type="button" onclick="mlSelectAll(true)">Select All</button>
+              <button type="button" onclick="mlSelectAll(false)">None</button>
+              <button type="button" onclick="loadMlFiles()">&#8635; Refresh</button>
+            </div>
+            <div class="file-list" id="mlFileList">
+              <div style="padding:12px;color:var(--text3);font-size:.78rem">Loading…</div>
+            </div>
+          </div>
+
+          <div style="margin-top:16px;display:flex;gap:10px">
+            <button class="btn btn-primary" id="mlTrainBtn" onclick="trainModel()" style="flex:1">&#128300; Train Model</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- RIGHT: Training output -->
+      <div class="log-wrap">
+        <div class="log-header">
+          <h3>Training Output</h3>
+          <button class="btn btn-ghost" onclick="refreshMlStatus()" style="padding:5px 12px;font-size:.75rem">&#8635; Refresh Status</button>
+        </div>
+        <div class="ml-output empty" id="mlOutput">No training run yet. Configure options and click Train Model.</div>
+      </div>
+
+    </div><!-- /control-wrap -->
+  </div><!-- /tab-training -->
+
 </div><!-- /container -->
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
@@ -624,6 +869,7 @@ function switchTab(tab) {
   document.querySelectorAll('.tab-btn').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + tab));
   if (tab === 'control') refreshBotStatus();
+  if (tab === 'training') { refreshMlStatus(); loadMlFiles(); }
 }
 
 // ─── API ─────────────────────────────────────────────────────────────────────
@@ -858,7 +1104,19 @@ function setMode(mode) {
 
 function onStrategyChange() {
   const s = document.getElementById('fStrategy').value;
+  const isAdaptive = s === 'adaptive';
   document.getElementById('abWindowGroup').style.display = s === 'alphabloom' ? '' : 'none';
+  document.getElementById('hotnessColdGroup').style.display = isAdaptive ? '' : 'none';
+  document.getElementById('volSkipGroup').style.display = isAdaptive ? '' : 'none';
+  // ML threshold is visible when adaptive OR ML toggle is on
+  syncMlThresholdVisibility();
+}
+
+function syncMlThresholdVisibility() {
+  const s = document.getElementById('fStrategy').value;
+  const mlOn = document.getElementById('tMl').checked;
+  document.getElementById('mlThresholdGroup').style.display =
+    (s === 'adaptive' || mlOn) ? '' : 'none';
 }
 
 function buildParams() {
@@ -871,13 +1129,20 @@ function buildParams() {
   const abWindow  = parseInt(document.getElementById('fAbWindow').value) || 60;
   const disKelly  = document.getElementById('tKelly').checked;
   const disRisk   = document.getElementById('tRisk').checked;
+  const mlOn      = document.getElementById('tMl').checked;
+  const mlThr     = parseFloat(document.getElementById('fMlThreshold').value);
+  const hotCold   = parseFloat(document.getElementById('fHotnessCold').value) || 0.48;
+  const volSkip   = parseFloat(document.getElementById('fVolSkip').value) || 0.75;
   const profitRaw = document.getElementById('fProfit').value.trim();
   const lossRaw   = document.getElementById('fLoss').value.trim();
   const profit    = profitRaw !== '' ? parseFloat(profitRaw) : null;
   const loss      = lossRaw  !== '' ? parseFloat(lossRaw)  : null;
   return { token, mode:currentMode, base_stake:stake, martingale:mart, max_stake:maxStake,
            threshold:thr, strategy, ab_window:abWindow, disable_kelly:disKelly,
-           disable_risk:disRisk, profit_target:profit, loss_limit:loss };
+           disable_risk:disRisk, ml_filter:mlOn,
+           ml_threshold: isNaN(mlThr) ? null : mlThr,
+           hotness_cold: hotCold, vol_skip_pct: volSkip,
+           profit_target:profit, loss_limit:loss };
 }
 
 function updateCmd() {
@@ -893,6 +1158,9 @@ function updateCmd() {
   const hintEl = document.getElementById('hMaxStake');
   if (hintEl) hintEl.textContent = `Covers up to ${hintLevels} consecutive losses`;
 
+  // Keep ML threshold visibility in sync with its trigger conditions
+  syncMlThresholdVisibility();
+
   let cmd = `python3 bot.py --token <span>${tokenDisplay}</span> --account-mode ${p.mode}`;
   cmd += ` --base-stake ${p.base_stake.toFixed(2)} --martingale ${p.martingale.toFixed(1)}`;
   cmd += ` --max-stake ${p.max_stake.toFixed(0)}`;
@@ -900,6 +1168,14 @@ function updateCmd() {
   if (p.strategy === 'alphabloom') cmd += ` --ab-window ${p.ab_window}`;
   if (p.disable_kelly)  cmd += ' --disable-kelly';
   if (p.disable_risk)   cmd += ' --disable-risk-engine';
+  if (p.ml_filter && p.strategy !== 'adaptive') cmd += ' --ml-filter';
+  if ((p.ml_filter || p.strategy === 'adaptive') && p.ml_threshold !== null) {
+    cmd += ` --ml-threshold ${p.ml_threshold.toFixed(2)}`;
+  }
+  if (p.strategy === 'adaptive') {
+    cmd += ` --hotness-cold ${p.hotness_cold.toFixed(2)}`;
+    cmd += ` --vol-skip-pct ${p.vol_skip_pct.toFixed(2)}`;
+  }
   if (p.profit_target !== null) cmd += ` --profit-target ${p.profit_target}`;
   if (p.loss_limit    !== null) cmd += ` --loss-limit ${p.loss_limit}`;
   document.getElementById('cmdPreview').innerHTML = cmd;
@@ -973,6 +1249,130 @@ async function stopBot() {
     btn.disabled = false;
     btn.innerHTML = '&#9209; Stop Bot';
   }
+}
+
+// ─── ML TRAINING ─────────────────────────────────────────────────────────────
+let mlFiles = [];
+
+async function refreshMlStatus() {
+  const statusEl = document.getElementById('mlStatus');
+  const gridEl = document.getElementById('mlMetaGrid');
+  const thrWrap = document.getElementById('mlThrTable').parentElement;
+  const thrTable = document.getElementById('mlThrTable');
+  const dot = document.getElementById('mlDot');
+  try {
+    const s = await apiFetch('?api=ml_model_status');
+    if (!s.trained) {
+      statusEl.innerHTML = `<div class="ml-status-dot untrained"></div>
+        <div class="ml-status-text">Not trained <span class="muted">— no data/ml_filter.pkl yet</span></div>`;
+      gridEl.style.display = 'none';
+      thrWrap.style.display = 'none';
+      dot.className = 'tab-dot off';
+      return;
+    }
+    dot.className = 'tab-dot on';
+    const m = s.meta || {};
+    const when = s.pkl_mtime ? fmtTs(s.pkl_mtime) : '—';
+    statusEl.innerHTML = `<div class="ml-status-dot trained"></div>
+      <div class="ml-status-text">Trained <span class="muted">— last updated ${when}</span></div>`;
+    if (m && Object.keys(m).length) {
+      const teAuc = m.test?.auc ?? null;
+      const trAuc = m.train?.auc ?? null;
+      const aucCol = (teAuc != null && teAuc > 0.55) ? 'var(--green)'
+                    : (teAuc != null && teAuc > 0.52) ? 'var(--amber)' : 'var(--red)';
+      gridEl.innerHTML = `
+        <div class="ml-meta-item"><div class="lbl">Model</div><div class="val">${m.model_kind||'—'}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Threshold</div><div class="val">${(m.threshold??0).toFixed(2)}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Trades Total</div><div class="val">${m.trades_total||0}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Train / Test</div><div class="val">${m.n_train||0} / ${m.n_test||0}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Train AUC</div><div class="val">${trAuc!=null?trAuc.toFixed(3):'—'}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Test AUC</div><div class="val" style="color:${aucCol}">${teAuc!=null?teAuc.toFixed(3):'—'}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Base WR (test)</div><div class="val">${m.test?.base_wr!=null?(m.test.base_wr*100).toFixed(1)+'%':'—'}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Files Used</div><div class="val">${(m.files_used||[]).length}</div></div>
+      `;
+      gridEl.style.display = '';
+      const thresholds = m.test?.thresholds || [];
+      if (thresholds.length) {
+        thrTable.innerHTML = `
+          <thead><tr><th>P(win) ≥</th><th>Trades Kept</th><th>Keep %</th><th>Win Rate</th></tr></thead>
+          <tbody>${thresholds.map(r => `
+            <tr>
+              <td>${r.p.toFixed(2)}</td>
+              <td>${r.n}</td>
+              <td>${(r.keep_frac*100).toFixed(1)}%</td>
+              <td style="color:${r.wr!=null && r.wr>0.52?'var(--green)':r.wr!=null && r.wr<0.5?'var(--red)':'var(--text2)'}">${r.wr!=null?(r.wr*100).toFixed(1)+'%':'—'}</td>
+            </tr>`).join('')}
+          </tbody>`;
+        thrWrap.style.display = '';
+      } else { thrWrap.style.display = 'none'; }
+    }
+  } catch(e) {
+    statusEl.innerHTML = `<div class="ml-status-dot untrained"></div>
+      <div class="ml-status-text">Error: ${e.message}</div>`;
+  }
+}
+
+async function loadMlFiles() {
+  const listEl = document.getElementById('mlFileList');
+  const countEl = document.getElementById('mlFileCount');
+  listEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:.78rem">Loading…</div>';
+  try {
+    mlFiles = await apiFetch('?api=ml_files');
+    if (!mlFiles.length) {
+      listEl.innerHTML = '<div style="padding:12px;color:var(--text3);font-size:.78rem">No trade logs found in data/</div>';
+      countEl.textContent = '';
+      return;
+    }
+    countEl.textContent = `(${mlFiles.length})`;
+    listEl.innerHTML = mlFiles.map(f => `
+      <label class="file-item">
+        <input type="checkbox" class="ml-file-chk" value="${f.file}" checked>
+        <span class="fname">${f.file}</span>
+        <span class="fmeta">${f.labeled} trades · ${fmtTs(f.mtime)}</span>
+      </label>
+    `).join('');
+  } catch(e) {
+    listEl.innerHTML = `<div style="padding:12px;color:var(--red);font-size:.78rem">Error: ${e.message}</div>`;
+  }
+}
+
+function mlSelectAll(checked) {
+  document.querySelectorAll('.ml-file-chk').forEach(c => { c.checked = checked; });
+}
+
+async function trainModel() {
+  const btn = document.getElementById('mlTrainBtn');
+  const out = document.getElementById('mlOutput');
+  const model = document.getElementById('fMlModel').value;
+  const thr = parseFloat(document.getElementById('fMlTrainThreshold').value) || 0.50;
+  const testFrac = parseFloat(document.getElementById('fMlTestFrac').value) || 0.20;
+  const minTrades = parseInt(document.getElementById('fMlMinTrades').value) || 300;
+  const include = Array.from(document.querySelectorAll('.ml-file-chk:checked')).map(c => c.value);
+  if (!include.length) {
+    alert('Select at least one training file.');
+    return;
+  }
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> Training…';
+  out.className = 'ml-output';
+  out.textContent = 'Running training…\n';
+  try {
+    const res = await apiPost('?api=ml_train', {
+      model, threshold: thr, test_frac: testFrac, min_trades: minTrades, include,
+    });
+    const tag = res.success ? 'SUCCESS' : 'FAILED';
+    out.textContent = `[${tag}] exit=${res.return_code} · elapsed=${res.elapsed_sec}s\n`
+      + `$ ${res.command}\n`
+      + '─'.repeat(60) + '\n'
+      + (res.output || '(no output)');
+    if (res.success) {
+      await refreshMlStatus();
+    }
+  } catch(e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '&#128300; Train Model';
 }
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
