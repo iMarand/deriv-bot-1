@@ -114,8 +114,11 @@ if (isset($_GET['api'])) {
         $mlOn      = !empty($body['ml_filter']);
         $mlThr     = isset($body['ml_threshold']) && $body['ml_threshold'] !== '' && $body['ml_threshold'] !== null
                      ? floatval($body['ml_threshold']) : null;
-        $hotCold   = floatval($body['hotness_cold'] ?? 0.48);
-        $volSkip   = floatval($body['vol_skip_pct'] ?? 0.75);
+        $hotCold   = floatval($body['hotness_cold']   ?? 0.43);
+        $hotProbe  = intval($body['hotness_probe']    ?? 20);
+        $mlIdle    = floatval($body['ml_idle_minutes'] ?? 10.0);
+        $mlFloor   = floatval($body['ml_floor']       ?? 0.45);
+        $volSkip   = floatval($body['vol_skip_pct']   ?? 0.75);
         $profitTgt = isset($body['profit_target']) && $body['profit_target'] !== '' && $body['profit_target'] !== null
                      ? floatval($body['profit_target']) : null;
         $lossLim   = isset($body['loss_limit']) && $body['loss_limit'] !== '' && $body['loss_limit'] !== null
@@ -133,7 +136,8 @@ if (isset($_GET['api'])) {
             $cmd .= sprintf(" --ml-threshold %.2f", $mlThr);
         }
         if ($strategy === 'adaptive') {
-            $cmd .= sprintf(" --hotness-cold %.2f --vol-skip-pct %.2f", $hotCold, $volSkip);
+            $cmd .= sprintf(" --hotness-cold %.2f --hotness-probe %d --vol-skip-pct %.2f", $hotCold, $hotProbe, $volSkip);
+            $cmd .= sprintf(" --ml-idle-minutes %.1f --ml-floor %.2f", $mlIdle, $mlFloor);
         }
         if ($profitTgt !== null) $cmd .= sprintf(" --profit-target %.2f", $profitTgt);
         if ($lossLim   !== null) $cmd .= sprintf(" --loss-limit %.2f", $lossLim);
@@ -233,7 +237,9 @@ if (isset($_GET['api'])) {
         $model    = in_array($body['model'] ?? '', ['logreg','gbm']) ? $body['model'] : 'logreg';
         $thr      = floatval($body['threshold'] ?? 0.50);
         $testFrac = floatval($body['test_frac'] ?? 0.20);
-        $minTr    = intval($body['min_trades']  ?? 300);
+        $minTr    = intval($body['min_trades']  ?? 200);
+        $histWt   = floatval($body['history_weight'] ?? 0.5);
+        $noHist   = !empty($body['no_history']);
         $incRaw   = $body['include'] ?? [];
         $include  = [];
         if (is_array($incRaw)) {
@@ -248,9 +254,10 @@ if (isset($_GET['api'])) {
         if ($testFrac <= 0 || $testFrac >= 1) { http_response_code(400); echo json_encode(['error'=>'test_frac out of range']); exit; }
 
         $cmd = sprintf(
-            "cd %s && python3 train_filter.py --model %s --threshold %.3f --test-frac %.3f --min-trades %d",
-            escapeshellarg($BOT_DIR), escapeshellarg($model), $thr, $testFrac, $minTr
+            "cd %s && python3 train_filter.py --model %s --threshold %.3f --test-frac %.3f --min-trades %d --history-weight %.2f",
+            escapeshellarg($BOT_DIR), escapeshellarg($model), $thr, $testFrac, $minTr, $histWt
         );
+        if ($noHist) $cmd .= ' --no-history';
         if ($include) {
             $cmd .= ' --include ' . escapeshellarg(implode(',', $include));
         }
@@ -275,6 +282,34 @@ if (isset($_GET['api'])) {
             'command'     => $cmd,
             'output'      => implode("\n", $output),
             'meta'        => $meta,
+        ]);
+        exit;
+    }
+
+    // ── fetch history (POST) ──────────────────────────────────────────────────
+    if ($_GET['api'] === 'fetch_history' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $hours = floatval($body['hours'] ?? 48);
+        $appId = intval($body['app_id'] ?? 1089);
+        if ($hours < 1 || $hours > 720) { http_response_code(400); echo json_encode(['error'=>'hours out of range (1-720)']); exit; }
+
+        $cmd = sprintf(
+            "cd %s && python3 fetch_history.py --app-id %d --hours %.0f 2>&1",
+            escapeshellarg($BOT_DIR), $appId, $hours
+        );
+
+        $t0 = microtime(true);
+        $output = [];
+        $ret = -1;
+        exec($cmd, $output, $ret);
+        $elapsed = microtime(true) - $t0;
+
+        echo json_encode([
+            'success'     => $ret === 0,
+            'return_code' => $ret,
+            'elapsed_sec' => round($elapsed, 2),
+            'command'     => $cmd,
+            'output'      => implode("\n", $output),
         ]);
         exit;
     }
@@ -699,13 +734,28 @@ canvas{width:100%!important;max-height:280px}
             </div>
             <div class="form-group" id="mlThresholdGroup" style="display:none">
               <label>ML Threshold</label>
-              <input type="number" id="fMlThreshold" value="0.50" step="0.01" min="0" max="1" oninput="updateCmd()">
+              <input type="number" id="fMlThreshold" value="0.52" step="0.01" min="0" max="1" oninput="updateCmd()">
               <span class="hint">P(win) cutoff — higher = fewer, better trades</span>
             </div>
             <div class="form-group" id="hotnessColdGroup" style="display:none">
               <label>Hotness Cold Cutoff</label>
-              <input type="number" id="fHotnessCold" value="0.48" step="0.01" min="0" max="1" oninput="updateCmd()">
-              <span class="hint">Skip symbols with rolling WR below this</span>
+              <input type="number" id="fHotnessCold" value="0.43" step="0.01" min="0" max="1" oninput="updateCmd()">
+              <span class="hint">Skip symbols with rolling WR below this (lowered to prevent over-blocking)</span>
+            </div>
+            <div class="form-group" id="hotnessProbeGroup" style="display:none">
+              <label>Hotness Probe Interval</label>
+              <input type="number" id="fHotnessProbe" value="20" step="1" min="5" max="100" oninput="updateCmd()">
+              <span class="hint">When cold, allow 1 in N candidates through as recovery probe</span>
+            </div>
+            <div class="form-group" id="mlIdleGroup" style="display:none">
+              <label>ML Idle Bypass (min)</label>
+              <input type="number" id="fMlIdle" value="10" step="1" min="1" max="60" oninput="updateCmd()">
+              <span class="hint">Auto-relax ML threshold after this many idle minutes</span>
+            </div>
+            <div class="form-group" id="mlFloorGroup" style="display:none">
+              <label>ML Floor Threshold</label>
+              <input type="number" id="fMlFloor" value="0.45" step="0.01" min="0.30" max="0.60" oninput="updateCmd()">
+              <span class="hint">Absolute minimum ML threshold even during idle bypass</span>
             </div>
             <div class="form-group" id="volSkipGroup" style="display:none">
               <label>Vol Skip Percentile</label>
@@ -818,8 +868,24 @@ canvas{width:100%!important;max-height:280px}
             </div>
             <div class="form-group">
               <label>Min Trades</label>
-              <input type="number" id="fMlMinTrades" value="300" step="50" min="50">
+              <input type="number" id="fMlMinTrades" value="200" step="50" min="50">
               <span class="hint">Fail if fewer labeled trades available</span>
+            </div>
+            <div class="form-group">
+              <label>History Weight</label>
+              <input type="number" id="fMlHistWeight" value="0.50" step="0.1" min="0.1" max="2.0">
+              <span class="hint">Weight for simulated ticks vs real trades (real=1.0)</span>
+            </div>
+          </div>
+
+          <!-- Toggles for history options -->
+          <div style="margin-top:14px;background:var(--bg3);border-radius:var(--radius-sm);padding:4px 14px">
+            <div class="toggle-row">
+              <div>
+                <div class="toggle-label">Exclude Historical Data</div>
+                <div class="toggle-sub">Skip history-trades.json (simulated ticks)</div>
+              </div>
+              <label class="toggle"><input type="checkbox" id="tNoHistory"><span class="toggle-slider"></span></label>
             </div>
           </div>
 
@@ -839,6 +905,31 @@ canvas{width:100%!important;max-height:280px}
 
           <div style="margin-top:16px;display:flex;gap:10px">
             <button class="btn btn-primary" id="mlTrainBtn" onclick="trainModel()" style="flex:1">&#128300; Train Model</button>
+          </div>
+
+          <!-- Fetch History section -->
+          <div style="margin-top:20px;padding-top:16px;border-top:1px solid var(--border)">
+            <h3 style="font-size:.85rem;font-weight:700;margin-bottom:12px;color:var(--text)">&#128225; Fetch Historical Ticks</h3>
+            <div style="font-size:.78rem;color:var(--text2);margin-bottom:12px;line-height:1.5">
+              Download historical tick data from Deriv API and simulate Pulse strategy outcomes.
+              This generates thousands of synthetic training trades in <code>data/history-trades.json</code>.
+            </div>
+            <div class="form-grid">
+              <div class="form-group">
+                <label>Hours of History</label>
+                <input type="number" id="fHistHours" value="48" step="12" min="1" max="720">
+                <span class="hint">48h ≈ 10K+ ticks per symbol</span>
+              </div>
+              <div class="form-group">
+                <label>App ID</label>
+                <input type="number" id="fHistAppId" value="1089" step="1" min="1">
+                <span class="hint">Deriv app_id (public endpoint)</span>
+              </div>
+            </div>
+            <div style="margin-top:12px">
+              <button class="btn btn-ghost" id="fetchHistBtn" onclick="fetchHistory()" style="width:100%">&#128225; Fetch & Simulate</button>
+            </div>
+            <div class="ml-output empty" id="fetchHistOutput" style="display:none;margin-top:10px"></div>
           </div>
         </div>
       </div>
@@ -1107,6 +1198,9 @@ function onStrategyChange() {
   const isAdaptive = s === 'adaptive';
   document.getElementById('abWindowGroup').style.display = s === 'alphabloom' ? '' : 'none';
   document.getElementById('hotnessColdGroup').style.display = isAdaptive ? '' : 'none';
+  document.getElementById('hotnessProbeGroup').style.display = isAdaptive ? '' : 'none';
+  document.getElementById('mlIdleGroup').style.display = isAdaptive ? '' : 'none';
+  document.getElementById('mlFloorGroup').style.display = isAdaptive ? '' : 'none';
   document.getElementById('volSkipGroup').style.display = isAdaptive ? '' : 'none';
   // ML threshold is visible when adaptive OR ML toggle is on
   syncMlThresholdVisibility();
@@ -1131,7 +1225,10 @@ function buildParams() {
   const disRisk   = document.getElementById('tRisk').checked;
   const mlOn      = document.getElementById('tMl').checked;
   const mlThr     = parseFloat(document.getElementById('fMlThreshold').value);
-  const hotCold   = parseFloat(document.getElementById('fHotnessCold').value) || 0.48;
+  const hotCold   = parseFloat(document.getElementById('fHotnessCold').value) || 0.43;
+  const hotProbe  = parseInt(document.getElementById('fHotnessProbe').value) || 20;
+  const mlIdle    = parseFloat(document.getElementById('fMlIdle').value) || 10;
+  const mlFloor   = parseFloat(document.getElementById('fMlFloor').value) || 0.45;
   const volSkip   = parseFloat(document.getElementById('fVolSkip').value) || 0.75;
   const profitRaw = document.getElementById('fProfit').value.trim();
   const lossRaw   = document.getElementById('fLoss').value.trim();
@@ -1141,7 +1238,9 @@ function buildParams() {
            threshold:thr, strategy, ab_window:abWindow, disable_kelly:disKelly,
            disable_risk:disRisk, ml_filter:mlOn,
            ml_threshold: isNaN(mlThr) ? null : mlThr,
-           hotness_cold: hotCold, vol_skip_pct: volSkip,
+           hotness_cold: hotCold, hotness_probe: hotProbe,
+           ml_idle_minutes: mlIdle, ml_floor: mlFloor,
+           vol_skip_pct: volSkip,
            profit_target:profit, loss_limit:loss };
 }
 
@@ -1174,7 +1273,10 @@ function updateCmd() {
   }
   if (p.strategy === 'adaptive') {
     cmd += ` --hotness-cold ${p.hotness_cold.toFixed(2)}`;
+    cmd += ` --hotness-probe ${p.hotness_probe}`;
     cmd += ` --vol-skip-pct ${p.vol_skip_pct.toFixed(2)}`;
+    cmd += ` --ml-idle-minutes ${p.ml_idle_minutes.toFixed(0)}`;
+    cmd += ` --ml-floor ${p.ml_floor.toFixed(2)}`;
   }
   if (p.profit_target !== null) cmd += ` --profit-target ${p.profit_target}`;
   if (p.loss_limit    !== null) cmd += ` --loss-limit ${p.loss_limit}`;
@@ -1280,10 +1382,15 @@ async function refreshMlStatus() {
       const trAuc = m.train?.auc ?? null;
       const aucCol = (teAuc != null && teAuc > 0.55) ? 'var(--green)'
                     : (teAuc != null && teAuc > 0.52) ? 'var(--amber)' : 'var(--red)';
+      const nSess = m.n_session_trades || m.trades_total || 0;
+      const nHist = m.n_history_trades || 0;
+      const hWt = m.history_weight ?? '—';
       gridEl.innerHTML = `
         <div class="ml-meta-item"><div class="lbl">Model</div><div class="val">${m.model_kind||'—'}</div></div>
         <div class="ml-meta-item"><div class="lbl">Threshold</div><div class="val">${(m.threshold??0).toFixed(2)}</div></div>
-        <div class="ml-meta-item"><div class="lbl">Trades Total</div><div class="val">${m.trades_total||0}</div></div>
+        <div class="ml-meta-item"><div class="lbl">Session Trades</div><div class="val">${nSess}</div></div>
+        <div class="ml-meta-item"><div class="lbl">History Trades</div><div class="val" style="color:${nHist>0?'var(--cyan)':'var(--text3)'}">${nHist}</div></div>
+        <div class="ml-meta-item"><div class="lbl">History Weight</div><div class="val">${typeof hWt==='number'?hWt.toFixed(1):hWt}</div></div>
         <div class="ml-meta-item"><div class="lbl">Train / Test</div><div class="val">${m.n_train||0} / ${m.n_test||0}</div></div>
         <div class="ml-meta-item"><div class="lbl">Train AUC</div><div class="val">${trAuc!=null?trAuc.toFixed(3):'—'}</div></div>
         <div class="ml-meta-item"><div class="lbl">Test AUC</div><div class="val" style="color:${aucCol}">${teAuc!=null?teAuc.toFixed(3):'—'}</div></div>
@@ -1346,7 +1453,9 @@ async function trainModel() {
   const model = document.getElementById('fMlModel').value;
   const thr = parseFloat(document.getElementById('fMlTrainThreshold').value) || 0.50;
   const testFrac = parseFloat(document.getElementById('fMlTestFrac').value) || 0.20;
-  const minTrades = parseInt(document.getElementById('fMlMinTrades').value) || 300;
+  const minTrades = parseInt(document.getElementById('fMlMinTrades').value) || 200;
+  const histWeight = parseFloat(document.getElementById('fMlHistWeight').value) || 0.5;
+  const noHistory = document.getElementById('tNoHistory').checked;
   const include = Array.from(document.querySelectorAll('.ml-file-chk:checked')).map(c => c.value);
   if (!include.length) {
     alert('Select at least one training file.');
@@ -1358,7 +1467,8 @@ async function trainModel() {
   out.textContent = 'Running training…\n';
   try {
     const res = await apiPost('?api=ml_train', {
-      model, threshold: thr, test_frac: testFrac, min_trades: minTrades, include,
+      model, threshold: thr, test_frac: testFrac, min_trades: minTrades,
+      history_weight: histWeight, no_history: noHistory, include,
     });
     const tag = res.success ? 'SUCCESS' : 'FAILED';
     out.textContent = `[${tag}] exit=${res.return_code} · elapsed=${res.elapsed_sec}s\n`
@@ -1373,6 +1483,35 @@ async function trainModel() {
   }
   btn.disabled = false;
   btn.innerHTML = '&#128300; Train Model';
+}
+
+async function fetchHistory() {
+  const btn = document.getElementById('fetchHistBtn');
+  const out = document.getElementById('fetchHistOutput');
+  const hours = parseFloat(document.getElementById('fHistHours').value) || 48;
+  const appId = parseInt(document.getElementById('fHistAppId').value) || 1089;
+
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> Fetching…';
+  out.style.display = '';
+  out.className = 'ml-output';
+  out.textContent = `Fetching ${hours}h of history for all symbols… this may take a few minutes.\n`;
+  try {
+    const res = await apiPost('?api=fetch_history', { hours, app_id: appId });
+    const tag = res.success ? 'SUCCESS' : 'FAILED';
+    out.textContent = `[${tag}] exit=${res.return_code} · elapsed=${res.elapsed_sec}s\n`
+      + `$ ${res.command}\n`
+      + '─'.repeat(60) + '\n'
+      + (res.output || '(no output)');
+    if (res.success) {
+      // Refresh file list to show the new history-trades.json
+      await loadMlFiles();
+    }
+  } catch(e) {
+    out.textContent = 'Error: ' + e.message;
+  }
+  btn.disabled = false;
+  btn.innerHTML = '&#128225; Fetch & Simulate';
 }
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────

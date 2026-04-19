@@ -35,7 +35,7 @@ from money import (
 )
 from index_selector import IndexSelector
 from filters import TimeFilter, ShadowTrader, ShadowTrade
-from adaptive import VolatilityGate, VolatilityGateConfig, evaluate_gates
+from adaptive import VolatilityGate, VolatilityGateConfig, evaluate_gates, get_gate_stats
 from hotness import HotnessTracker
 
 logger = logging.getLogger("deriv_bot")
@@ -139,6 +139,7 @@ class DerivBot:
         self._contract_poll_attempts: int = 0
         self._last_best_symbol: Optional[str] = None
         self._session_started_at: float = time.time()
+        self._last_trade_ts: float = 0.0  # for adaptive idle bypass
         self._initial_equity: float = 0.0
         self._account_loginid: Optional[str] = None
         self._account_currency: Optional[str] = None
@@ -634,6 +635,8 @@ class DerivBot:
             hotness=self.hotness_tracker,
             vol_gate=self.vol_gate,
             vt=vt,
+            last_trade_ts=self._last_trade_ts,
+            all_symbols=list(self.cfg.index.symbols),
         )
         if not decision.accept:
             self._set_symbol_status(symbol, decision.reason, signal.composite_score)
@@ -803,6 +806,7 @@ class DerivBot:
         if self.ml_filter is not None:
             self.ml_filter.on_trade_result(symbol, contract_type, trade.timestamp, is_win)
         self._trade_count += 1
+        self._last_trade_ts = time.time()  # update for adaptive idle bypass
         self._write_app_json()
 
         icon = "WIN" if is_win else "LOSS"
@@ -1053,6 +1057,12 @@ class DerivBot:
         logger.info(f"  Net P/L: ${total_pnl:+.2f}")
         logger.info(f"  Final equity: ${self.equity:.2f}")
         logger.info(f"  Martingale net: ${self.martingale.net_pnl:+.2f}")
+        # Adaptive gate statistics
+        if self.cfg.strategy == "adaptive":
+            stats = get_gate_stats()
+            logger.info("  %s", stats.summary())
+            if self.ml_filter is not None:
+                logger.info("  %s", self.ml_filter.summary())
         logger.info("═" * 60)
 
 
@@ -1142,8 +1152,20 @@ def main():
         help="Adaptive: rolling window for per-symbol WR (default 50)",
     )
     parser.add_argument(
-        "--hotness-cold", type=float, default=0.48,
-        help="Adaptive: skip symbols whose rolling WR is below this (default 0.48)",
+        "--hotness-cold", type=float, default=0.43,
+        help="Adaptive: skip symbols whose rolling WR is below this (default 0.43)",
+    )
+    parser.add_argument(
+        "--hotness-probe", type=int, default=20,
+        help="Adaptive: when cold, allow 1 in N candidates through as recovery probe (default 20)",
+    )
+    parser.add_argument(
+        "--ml-idle-minutes", type=float, default=10.0,
+        help="ML filter: bypass threshold after this many idle minutes (default 10)",
+    )
+    parser.add_argument(
+        "--ml-floor", type=float, default=0.45,
+        help="ML filter: absolute minimum threshold even during bypass (default 0.45)",
     )
     parser.add_argument(
         "--vol-skip-pct", type=float, default=0.75,
@@ -1238,7 +1260,12 @@ def main():
         if args.ml_filter or args.strategy == "adaptive":
             from ml_filter import MLFilter
             try:
-                ml_filter_instance = MLFilter(args.ml_model, threshold=args.ml_threshold)
+                ml_filter_instance = MLFilter(
+                    args.ml_model,
+                    threshold=args.ml_threshold,
+                    max_idle_minutes=args.ml_idle_minutes,
+                    absolute_floor=args.ml_floor,
+                )
             except FileNotFoundError as e:
                 logging.getLogger("deriv_bot").warning(
                     "ML filter unavailable: %s  (continuing without ML gate)", e,
@@ -1247,6 +1274,7 @@ def main():
         hotness_instance = HotnessTracker(
             window=args.hotness_window,
             cold_threshold=args.hotness_cold,
+            probe_interval=args.hotness_probe,
         )
         vol_gate_instance = VolatilityGate(VolatilityGateConfig(
             enabled=not args.disable_vol_gate,

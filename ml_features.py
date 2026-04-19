@@ -15,6 +15,11 @@ Features (metadata-only — no tick stream needed):
     global_wr_50                    (overall rolling win rate)
     sec_since_last_sym              (log-seconds since last trade on this symbol)
     sec_since_last_global           (log-seconds since last trade overall)
+
+Anti-fearfulness design choices:
+    - Wider rolling windows (20/100) so features are smoother and less jumpy
+    - Loss streak capped at 10 (not 20) — prevents extreme fear signals
+    - When too few samples, features default to neutral 0.5 instead of 0.0
 """
 
 from __future__ import annotations
@@ -56,7 +61,7 @@ class FeatureBuilder:
     state.
     """
 
-    def __init__(self, short_window: int = 10, long_window: int = 50):
+    def __init__(self, short_window: int = 20, long_window: int = 100):
         self.short = short_window
         self.long = long_window
 
@@ -97,20 +102,28 @@ class FeatureBuilder:
         sym_hist = self._sym_hist.get(symbol)
         if sym_hist and len(sym_hist) > 0:
             vec[base + 4] = float(sym_hist[-1])
+        else:
+            vec[base + 4] = 0.5  # neutral when unknown
         if len(self._global_hist) > 0:
             vec[base + 5] = float(self._global_hist[-1])
-        vec[base + 6] = float(min(self._global_loss_streak, 20)) / 20.0
+        else:
+            vec[base + 5] = 0.5  # neutral when unknown
 
-        # rolling WRs
-        if sym_hist and len(sym_hist) > 0:
-            recent10 = list(sym_hist)[-self.short:]
-            vec[base + 7] = sum(recent10) / len(recent10)
+        # Loss streak — cap at 10 instead of 20 to prevent extreme fear signals
+        vec[base + 6] = float(min(self._global_loss_streak, 10)) / 10.0
+
+        # rolling WRs — use neutral 0.5 default when insufficient data
+        if sym_hist and len(sym_hist) >= 5:
+            recent_short = list(sym_hist)[-self.short:]
+            vec[base + 7] = sum(recent_short) / len(recent_short)
             vec[base + 8] = sum(sym_hist) / len(sym_hist)
         else:
+            # Not enough data — use neutral values so model doesn't see
+            # "zero history" as a scary signal
             vec[base + 7] = 0.5
             vec[base + 8] = 0.5
 
-        if len(self._global_hist) > 0:
+        if len(self._global_hist) >= 5:
             vec[base + 9] = sum(self._global_hist) / len(self._global_hist)
         else:
             vec[base + 9] = 0.5
