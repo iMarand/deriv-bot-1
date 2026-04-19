@@ -1164,8 +1164,8 @@ def main():
         help="ML filter: bypass threshold after this many idle minutes (default 10)",
     )
     parser.add_argument(
-        "--ml-floor", type=float, default=0.45,
-        help="ML filter: absolute minimum threshold even during bypass (default 0.45)",
+        "--ml-floor", type=float, default=0.35,
+        help="ML filter: absolute minimum threshold even during bypass (default 0.35)",
     )
     parser.add_argument(
         "--vol-skip-pct", type=float, default=0.75,
@@ -1266,6 +1266,9 @@ def main():
                     max_idle_minutes=args.ml_idle_minutes,
                     absolute_floor=args.ml_floor,
                 )
+                # Pre-seed with recent session data to avoid cold-start
+                data_dir = Path(__file__).parent / "data"
+                ml_filter_instance.warm_from_session(data_dir)
             except FileNotFoundError as e:
                 logging.getLogger("deriv_bot").warning(
                     "ML filter unavailable: %s  (continuing without ML gate)", e,

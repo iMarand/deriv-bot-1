@@ -117,7 +117,7 @@ if (isset($_GET['api'])) {
         $hotCold   = floatval($body['hotness_cold']   ?? 0.43);
         $hotProbe  = intval($body['hotness_probe']    ?? 20);
         $mlIdle    = floatval($body['ml_idle_minutes'] ?? 10.0);
-        $mlFloor   = floatval($body['ml_floor']       ?? 0.45);
+        $mlFloor   = floatval($body['ml_floor']       ?? 0.35);
         $volSkip   = floatval($body['vol_skip_pct']   ?? 0.75);
         $profitTgt = isset($body['profit_target']) && $body['profit_target'] !== '' && $body['profit_target'] !== null
                      ? floatval($body['profit_target']) : null;
@@ -734,7 +734,7 @@ canvas{width:100%!important;max-height:280px}
             </div>
             <div class="form-group" id="mlThresholdGroup" style="display:none">
               <label>ML Threshold</label>
-              <input type="number" id="fMlThreshold" value="0.52" step="0.01" min="0" max="1" oninput="updateCmd()">
+              <input type="number" id="fMlThreshold" value="0.45" step="0.01" min="0" max="1" oninput="updateCmd()">
               <span class="hint">P(win) cutoff — higher = fewer, better trades</span>
             </div>
             <div class="form-group" id="hotnessColdGroup" style="display:none">
@@ -754,7 +754,7 @@ canvas{width:100%!important;max-height:280px}
             </div>
             <div class="form-group" id="mlFloorGroup" style="display:none">
               <label>ML Floor Threshold</label>
-              <input type="number" id="fMlFloor" value="0.45" step="0.01" min="0.30" max="0.60" oninput="updateCmd()">
+              <input type="number" id="fMlFloor" value="0.35" step="0.01" min="0.20" max="0.60" oninput="updateCmd()">
               <span class="hint">Absolute minimum ML threshold even during idle bypass</span>
             </div>
             <div class="form-group" id="volSkipGroup" style="display:none">
@@ -1228,7 +1228,7 @@ function buildParams() {
   const hotCold   = parseFloat(document.getElementById('fHotnessCold').value) || 0.43;
   const hotProbe  = parseInt(document.getElementById('fHotnessProbe').value) || 20;
   const mlIdle    = parseFloat(document.getElementById('fMlIdle').value) || 10;
-  const mlFloor   = parseFloat(document.getElementById('fMlFloor').value) || 0.45;
+  const mlFloor   = parseFloat(document.getElementById('fMlFloor').value) || 0.35;
   const volSkip   = parseFloat(document.getElementById('fVolSkip').value) || 0.75;
   const profitRaw = document.getElementById('fProfit').value.trim();
   const lossRaw   = document.getElementById('fLoss').value.trim();

@@ -8,6 +8,8 @@ This is a FILTER, not a signal generator: the base strategy still decides WHAT
 to trade. The filter only decides WHETHER to trade it.
 
 Anti-fearfulness features:
+  - Cold-start warm-up: on init, pre-seeds FeatureBuilder with the most recent
+    session's trade history so features match the training distribution
   - Inactivity bypass: if no trade has passed in `max_idle_minutes`, threshold
     is temporarily lowered to break deadlocks
   - Pass-rate floor: if cumulative pass rate drops below `min_pass_rate`, the
@@ -17,6 +19,7 @@ Anti-fearfulness features:
 
 from __future__ import annotations
 
+import json
 import logging
 import pickle
 import time
@@ -38,7 +41,7 @@ class MLFilter:
         max_idle_minutes: float = 10.0,
         min_pass_rate: float = 0.05,
         idle_threshold_decay: float = 0.85,
-        absolute_floor: float = 0.45,
+        absolute_floor: float = 0.35,
     ):
         path = Path(model_path)
         if not path.exists():
@@ -84,6 +87,73 @@ class MLFilter:
             max_idle_minutes,
             absolute_floor,
         )
+
+    # ------------------------------------------------------------------
+    # Cold-start warm-up — feed recent trade history so features match
+    # the distribution the model was trained on
+    # ------------------------------------------------------------------
+
+    def warm_from_session(self, data_dir: str | Path = "data") -> int:
+        """Pre-seed FeatureBuilder with the most recent session's trades.
+
+        This solves the cold-start problem where the model outputs low
+        probabilities because it's never seen the 'empty FeatureBuilder'
+        pattern during training.
+
+        Returns the number of trades replayed.
+        """
+        data_path = Path(data_dir)
+        if not data_path.exists():
+            return 0
+
+        # Find the most recent non-history session file
+        candidates = []
+        for f in data_path.glob("*-trades.json"):
+            if f.name == "history-trades.json":
+                continue
+            if f.name == "ml_filter.json":
+                continue
+            try:
+                mtime = f.stat().st_mtime
+                candidates.append((mtime, f))
+            except OSError:
+                continue
+
+        if not candidates:
+            logger.info("MLFilter warm-up: no session files found")
+            return 0
+
+        # Pick the most recent file
+        candidates.sort(reverse=True)
+        _, best_file = candidates[0]
+
+        try:
+            d = json.loads(best_file.read_text(encoding="utf-8"))
+            trades = d.get("trades", [])
+        except Exception as e:
+            logger.warning("MLFilter warm-up: failed to read %s: %s", best_file.name, e)
+            return 0
+
+        if not trades:
+            return 0
+
+        # Replay trades through FeatureBuilder (but DON'T count as evaluated)
+        count = 0
+        for t in trades:
+            symbol = t.get("symbol")
+            contract_type = t.get("contract_type")
+            ts = float(t.get("timestamp", 0))
+            result = t.get("result")
+            if not symbol or not contract_type or result not in ("win", "loss"):
+                continue
+            self._fb.record(symbol, contract_type, ts, result == "win")
+            count += 1
+
+        logger.info(
+            "MLFilter warm-up: replayed %d trades from %s → features pre-seeded",
+            count, best_file.name,
+        )
+        return count
 
     # ------------------------------------------------------------------
     # Feature-state updates — call on every completed trade so the filter
