@@ -831,7 +831,21 @@ class DerivBot:
         self._pending_proposal = None
 
     async def _poll_stuck_contract(self) -> None:
-        if not self.active_contract or self.active_contract == "proposal_pending":
+        # ── Proposal timeout: if we've been waiting for a proposal response
+        # for over 30 seconds, the API likely dropped the request. Reset.
+        if self.active_contract == "proposal_pending":
+            if self._active_contract_started_at:
+                proposal_elapsed = time.time() - self._active_contract_started_at
+                if proposal_elapsed > 30.0:
+                    logger.warning(
+                        "PROPOSAL TIMEOUT: %s waited %ds for proposal response — resetting to allow new trades",
+                        self._active_contract_symbol,
+                        int(proposal_elapsed),
+                    )
+                    self._clear_active_contract()
+            return
+
+        if not self.active_contract:
             return
         if not self._active_contract_started_at:
             return
