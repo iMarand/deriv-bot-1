@@ -381,8 +381,8 @@ body::before{content:'';position:fixed;inset:0;z-index:9999;pointer-events:none;
 /* ── SESSION GRID ── */
 .sessions-panel{margin-bottom:28px}
 .sessions-panel h2{font-size:.75rem;font-weight:600;color:var(--text2);margin-bottom:12px;text-transform:uppercase;letter-spacing:.08em}
-.session-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(280px,1fr));gap:12px}
-.session-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;cursor:pointer;transition:all .15s;position:relative;overflow:hidden}
+.session-grid{display:flex;flex-wrap:nowrap;gap:12px;overflow-x:auto;padding-bottom:10px}
+.session-card{flex:0 0 280px;background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:16px;cursor:pointer;transition:all .15s;position:relative;overflow:hidden}
 .session-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 8px 30px #00000040}
 .session-card.active-card{border-color:var(--green);box-shadow:0 0 0 1px var(--green),0 8px 30px #00e67615}
 .session-card.live-card::before{content:'';position:absolute;top:12px;right:12px;width:8px;height:8px;background:var(--green);border-radius:50%;animation:pulse-live 2s infinite}
@@ -565,7 +565,6 @@ canvas{width:100%!important;max-height:280px}
 .loading-overlay p{color:var(--text2);font-size:.85rem}
 @media(max-width:640px){
   .stats-row{grid-template-columns:repeat(2,1fr)}
-  .session-grid{grid-template-columns:1fr}
   .config-bar,.form-grid{gap:12px}
   .header{flex-direction:column;align-items:flex-start;gap:12px}
   .form-grid{grid-template-columns:1fr}
