@@ -185,14 +185,20 @@ class APIConfig:
 
 # ── Trade Strategy constants ──────────────────────────────────────────────────
 # These map high-level strategy names to Deriv contract types.
+# barrier_mode: "relative" = offset from spot (+/-X.XX), "absolute" = exact price
+# duration_unit_override: override the default "t" (ticks) with e.g. "m" (minutes)
 TRADE_STRATEGIES = {
     "even_odd":              {"contracts": ("DIGITEVEN", "DIGITODD"), "pattern": None, "duration": 5},
     "rise_fall_roll":        {"contracts": ("CALL", "PUT"),          "pattern": "rollcake", "duration": 5},
     "rise_fall_zigzag":      {"contracts": ("CALL", "PUT"),          "pattern": "zigzag",   "duration": 7},
-    "higher_lower_roll":     {"contracts": ("CALL", "PUT"),          "pattern": "rollcake", "duration": 5, "barrier": True},
-    "higher_lower_zigzag":   {"contracts": ("CALL", "PUT"),          "pattern": "zigzag",   "duration": 7, "barrier": True},
+    "higher_lower_roll":     {"contracts": ("CALL", "PUT"),          "pattern": "rollcake", "duration": 5,
+                              "barrier": True, "barrier_mode": "relative"},
+    "higher_lower_zigzag":   {"contracts": ("CALL", "PUT"),          "pattern": "zigzag",   "duration": 7,
+                              "barrier": True, "barrier_mode": "relative"},
     "over_under_roll":       {"contracts": ("DIGITOVER", "DIGITUNDER"), "pattern": "rollcake", "duration": 5, "digit_barrier": True},
-    "touch_notouch_zigzag":  {"contracts": ("ONETOUCH", "NOTOUCH"),  "pattern": "zigzag",   "duration": 7, "barrier": True},
+    "touch_notouch_zigzag":  {"contracts": ("ONETOUCH", "NOTOUCH"),  "pattern": "zigzag",
+                              "duration": 5, "duration_unit_override": "m",
+                              "barrier": True, "barrier_mode": "relative"},
 }
 
 TRADE_STRATEGY_CHOICES = list(TRADE_STRATEGIES.keys())
