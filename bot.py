@@ -21,12 +21,15 @@ from typing import Dict, Optional, Tuple
 
 import websockets
 
-from config import BotConfig
+from config import BotConfig, TRADE_STRATEGIES
 from analysis import DigitTracker, VolatilityTracker
 from regime import RegimeDetector, Regime
 from ensemble import EnsembleScorer, SignalSnapshot
 from alphabloom import AlphaBloomScorer
 from pulse import PulseScorer
+from novaburst import NovaBurstScorer
+from rollcake import RollCakeScorer
+from zigzag import ZigzagScorer
 from money import (
     MartingaleEngine,
     KellyCalculator,
@@ -104,6 +107,9 @@ class DerivBot:
         self._regime_detectors: Dict[str, RegimeDetector] = {}
         self._ab_scorers: Dict[str, AlphaBloomScorer] = {}  # per-symbol AlphaBloom
         self._pulse_scorers: Dict[str, PulseScorer] = {}  # per-symbol Pulse
+        self._novaburst_scorers: Dict[str, NovaBurstScorer] = {}  # per-symbol NovaBurst
+        self._rollcake_scorers: Dict[str, RollCakeScorer] = {}  # per-symbol RollCake
+        self._zigzag_scorers: Dict[str, ZigzagScorer] = {}  # per-symbol Zigzag
 
         # Shared components
         self.scorer = EnsembleScorer(self.cfg.ensemble)
@@ -177,8 +183,29 @@ class DerivBot:
             self._pulse_scorers[symbol] = PulseScorer(
                 fast_window=p_cfg.fast_window,
                 slow_window=p_cfg.slow_window,
+                micro_window=p_cfg.micro_window,
                 min_fast_pct=p_cfg.min_fast_pct,
                 cooldown_ticks=p_cfg.cooldown_ticks,
+            )
+            # NovaBurst
+            nb_cfg = self.cfg.novaburst
+            self._novaburst_scorers[symbol] = NovaBurstScorer(nb_cfg)
+            # Pattern detectors (used by trade strategies)
+            rc_cfg = self.cfg.rollcake
+            self._rollcake_scorers[symbol] = RollCakeScorer(
+                window_size=rc_cfg.window_size,
+                min_autocorrelation=rc_cfg.min_autocorrelation,
+                cycle_lags=rc_cfg.cycle_lags,
+                min_streak=rc_cfg.min_streak,
+                cooldown_ticks=rc_cfg.cooldown_ticks,
+            )
+            zz_cfg = self.cfg.zigzag
+            self._zigzag_scorers[symbol] = ZigzagScorer(
+                tick_count=zz_cfg.tick_count,
+                min_swings=zz_cfg.min_swings,
+                amplitude_threshold=zz_cfg.amplitude_threshold,
+                cooldown_ticks=zz_cfg.cooldown_ticks,
+                lookback_buffer=zz_cfg.lookback_buffer,
             )
             self._tick_counts[symbol] = 0
             self._symbol_status[symbol] = "warming up"
@@ -428,6 +455,13 @@ class DerivBot:
         ab.update(quote_str)
         ps = self._pulse_scorers[symbol]
         ps.update(quote_str)
+        nb = self._novaburst_scorers[symbol]
+        nb.update(quote_str)
+        # Feed price to pattern detectors
+        rc = self._rollcake_scorers[symbol]
+        rc.update(price)
+        zz = self._zigzag_scorers[symbol]
+        zz.update(price)
 
         if len(vt.returns) > 0:
             rd.update(float(vt.returns[-1]))
@@ -455,6 +489,8 @@ class DerivBot:
             return self._process_tick_alphabloom(symbol, ab, rd)
         elif strategy == "pulse":
             return self._process_tick_pulse(symbol, ps, rd)
+        elif strategy == "novaburst":
+            return self._process_tick_novaburst(symbol, nb, rd)
         elif strategy == "adaptive":
             # Adaptive reuses pulse's scan/selection, then bot-level gates filter.
             return self._process_tick_pulse(symbol, ps, rd)
@@ -582,6 +618,52 @@ class DerivBot:
         )
         return (symbol, best_sig)
 
+    def _process_tick_novaburst(
+        self, symbol: str, nb: NovaBurstScorer, rd: RegimeDetector,
+    ) -> Optional[Tuple[str, SignalSnapshot]]:
+        """NovaBurst: multi-layer convergence, scan all indices."""
+        if not nb.warmed:
+            self._set_symbol_status(symbol, f"warming {nb._tick_count}/{nb.cfg.min_warmup} ticks")
+            return None
+
+        self._set_symbol_status(
+            symbol,
+            f"NB {nb.status_summary}",
+            0.0,
+        )
+
+        # Scan ALL symbols for best NovaBurst signal
+        best_sym: Optional[str] = None
+        best_sig: Optional[SignalSnapshot] = None
+        best_score: float = -1.0
+
+        for s, s_nb in self._novaburst_scorers.items():
+            if not s_nb.warmed:
+                continue
+            s_rd = self._regime_detectors.get(s)
+            if s_rd is None or not self._regime_ready(s_rd):
+                continue
+            sig = s_nb.score(regime_det=s_rd)
+            if sig is None or not self._passes_direction_policy(sig):
+                continue
+            rank = self._direction_adjusted_score(sig)
+            if rank > best_score:
+                best_score = rank
+                best_sym = s
+                best_sig = sig
+
+        if best_sym is None or best_sig is None:
+            return None
+        if best_sym != symbol:
+            return None
+
+        self._set_symbol_status(
+            symbol,
+            f"NB TRADE {best_sig.direction} score={best_sig.composite_score:.3f} {nb.status_summary}",
+            best_sig.composite_score,
+        )
+        return (symbol, best_sig)
+
     def _process_tick_ensemble(
         self, symbol: str, dt: DigitTracker, vt: VolatilityTracker, rd: RegimeDetector,
     ) -> Optional[Tuple[str, SignalSnapshot]]:
@@ -627,7 +709,7 @@ class DerivBot:
         if self.ml_filter is None and self.hotness_tracker is None and self.vol_gate is None:
             return True
 
-        contract_type = f"DIGIT{signal.direction}"
+        contract_type = self._resolve_contract_type(signal)
         vt = self._vol_trackers.get(symbol)
         decision = evaluate_gates(
             symbol, contract_type, time.time(),
@@ -646,8 +728,143 @@ class DerivBot:
             )
         return decision.accept
 
+    def _pattern_filter_passes(self, symbol: str, signal: SignalSnapshot) -> bool:
+        """Check if the selected trade strategy's pattern filter confirms the signal.
+
+        For even_odd trade strategy, no pattern filter is needed.
+        For rollcake/zigzag strategies, the pattern detector must agree.
+        """
+        ts_info = TRADE_STRATEGIES.get(self.cfg.trade_strategy, {})
+        pattern = ts_info.get("pattern")
+        if pattern is None:
+            return True  # No pattern filter for even_odd
+
+        if pattern == "rollcake":
+            rc = self._rollcake_scorers.get(symbol)
+            if rc is None or not rc.warmed:
+                return False
+            result = rc.score()
+            if result is None:
+                return False
+            rc_dir, rc_conf = result
+            # Pattern must have minimum confidence
+            if rc_conf < 0.25:
+                return False
+            # Attach pattern info to signal
+            signal.trade_strategy = self.cfg.trade_strategy
+            return True
+
+        if pattern == "zigzag":
+            zz = self._zigzag_scorers.get(symbol)
+            if zz is None or not zz.warmed:
+                return False
+            result = zz.score()
+            if result is None:
+                return False
+            zz_dir, zz_conf = result
+            if zz_conf < 0.20:
+                return False
+            signal.trade_strategy = self.cfg.trade_strategy
+            return True
+
+        return True
+
+    def _resolve_contract_type(self, signal: SignalSnapshot) -> str:
+        """Map the algorithm's signal direction + trade_strategy to a Deriv contract_type."""
+        ts = self.cfg.trade_strategy
+        ts_info = TRADE_STRATEGIES.get(ts, {})
+        contracts = ts_info.get("contracts", ("DIGITEVEN", "DIGITODD"))
+
+        if ts == "even_odd":
+            return f"DIGIT{signal.direction}"  # DIGITEVEN or DIGITODD
+
+        # For RISE/FALL, HIGHER/LOWER: use pattern direction
+        if ts in ("rise_fall_roll", "rise_fall_zigzag", "higher_lower_roll", "higher_lower_zigzag"):
+            # Get pattern direction
+            pattern = ts_info.get("pattern")
+            pattern_dir = self._get_pattern_direction(signal, pattern)
+            return "CALL" if pattern_dir == "RISE" else "PUT"
+
+        # For OVER/UNDER: use digit bias direction
+        if ts == "over_under_roll":
+            return "DIGITOVER" if signal.direction == "EVEN" else "DIGITUNDER"
+
+        # For TOUCH/NO TOUCH: use zigzag direction
+        if ts == "touch_notouch_zigzag":
+            zz = self._zigzag_scorers.get(self._current_symbol or "")
+            if zz:
+                result = zz.score()
+                if result:
+                    zz_dir, _ = result
+                    return "ONETOUCH" if zz_dir == "RISE" else "NOTOUCH"
+            return "ONETOUCH"
+
+        return f"DIGIT{signal.direction}"
+
+    def _get_pattern_direction(self, signal: SignalSnapshot, pattern: str) -> str:
+        """Get the pattern detector's direction prediction."""
+        sym = self._current_symbol or ""
+        if pattern == "rollcake":
+            rc = self._rollcake_scorers.get(sym)
+            if rc:
+                result = rc.score()
+                if result:
+                    return result[0]  # "RISE" or "FALL"
+        elif pattern == "zigzag":
+            zz = self._zigzag_scorers.get(sym)
+            if zz:
+                result = zz.score()
+                if result:
+                    return result[0]
+        # Fallback: use digit bias as direction hint
+        return "RISE" if signal.direction == "EVEN" else "FALL"
+
+    def _compute_barrier(self, symbol: str) -> Optional[float]:
+        """Compute a barrier value for contracts that need one.
+
+        Uses recent price data from the zigzag/rollcake scorers.
+        """
+        ts = self.cfg.trade_strategy
+        ts_info = TRADE_STRATEGIES.get(ts, {})
+
+        if ts_info.get("digit_barrier"):
+            # OVER/UNDER: barrier is a digit (default 4 or 5)
+            return None  # Handled separately via digit_barrier field
+
+        if not ts_info.get("barrier"):
+            return None
+
+        # Price barrier: use recent high/low from zigzag scorer
+        zz = self._zigzag_scorers.get(symbol)
+        vt = self._vol_trackers.get(symbol)
+
+        if zz and zz.warmed:
+            current = zz.current_price
+            high = zz.recent_high
+            low = zz.recent_low
+            spread = high - low
+            if spread > 0:
+                # For HIGHER: barrier slightly above current
+                # For TOUCH: barrier at recent high/low
+                offset = spread * 0.3 + self.cfg.contract.barrier_offset
+                return round(current + offset, 4)
+
+        # Fallback: use ATR if available
+        if vt and vt.atr is not None:
+            prices = list(vt.prices)
+            if prices:
+                current = prices[-1]
+                return round(current + vt.atr * 0.5, 4)
+
+        return None
+
+    def _compute_digit_barrier(self) -> int:
+        """Compute digit barrier for OVER/UNDER contracts."""
+        # Default: 4 (DIGITOVER 4 means last digit > 4, i.e. 5-9)
+        return 4
+
     async def _request_proposal(self, symbol: str, signal: SignalSnapshot) -> None:
-        contract_type = f"DIGIT{signal.direction}"
+        contract_type = self._resolve_contract_type(signal)
         threshold = self._direction_threshold(signal)
         if signal.composite_score < threshold:
             logger.warning(
@@ -663,6 +880,15 @@ class DerivBot:
             )
             return
 
+        # Pattern filter: confirm with rollcake/zigzag if applicable
+        if not self._pattern_filter_passes(symbol, signal):
+            self._set_symbol_status(
+                symbol,
+                f"pattern filter blocked ({self.cfg.trade_strategy})",
+                signal.composite_score,
+            )
+            return
+
         kf = self.kelly.kelly_fraction()
         stake = self.martingale.next_stake(self.equity, kf, skip_cooldown=self._disable_risk_engine)
         if not self._disable_risk_engine:
@@ -671,16 +897,34 @@ class DerivBot:
             self._set_symbol_status(symbol, "stake skipped by risk engine")
             return
 
+        # Determine duration from trade strategy
+        ts_info = TRADE_STRATEGIES.get(self.cfg.trade_strategy, {})
+        duration = ts_info.get("duration", self.cfg.contract.duration)
+
         proposal = {
             "proposal": 1,
             "amount": stake,
             "basis": self.cfg.contract.basis,
             "contract_type": contract_type,
             "currency": self.cfg.contract.currency,
-            "duration": self.cfg.contract.duration,
+            "duration": duration,
             "duration_unit": self.cfg.contract.duration_unit,
             "symbol": symbol,
         }
+
+        # Add barrier if needed
+        if ts_info.get("barrier"):
+            barrier = self._compute_barrier(symbol)
+            if barrier is not None:
+                proposal["barrier"] = str(barrier)
+            else:
+                logger.warning("Cannot compute barrier for %s — skipping", self.cfg.trade_strategy)
+                return
+
+        if ts_info.get("digit_barrier"):
+            digit_b = self._compute_digit_barrier()
+            proposal["barrier"] = str(digit_b)
+
         self._pending_proposal = {
             "symbol": symbol,
             "signal": signal,
@@ -694,14 +938,19 @@ class DerivBot:
         self._active_contract_started_at = time.time()
         self._active_contract_expected_seconds = estimate_contract_seconds(
             symbol,
-            self.cfg.contract.duration,
+            duration,
             self.cfg.contract.duration_unit,
         )
+
+        barrier_str = ""
+        if "barrier" in proposal:
+            barrier_str = f" | barrier={proposal['barrier']}"
 
         logger.info(
             f"Requesting proposal: {contract_type} on {symbol} | "
             f"stake=${stake:.2f} | score={signal.composite_score:.3f} | "
             f"threshold={threshold:.3f} | regime={signal.regime.name} | "
+            f"trade_strategy={self.cfg.trade_strategy}{barrier_str} | "
             f"sizing={self.martingale.last_stake_reason}"
         )
         await self._send(proposal)
@@ -738,6 +987,12 @@ class DerivBot:
                 self._ab_scorers[sym].on_trade_placed()
             if sym in self._pulse_scorers:
                 self._pulse_scorers[sym].on_trade_placed()
+            if sym in self._novaburst_scorers:
+                self._novaburst_scorers[sym].on_trade_placed()
+            if sym in self._rollcake_scorers:
+                self._rollcake_scorers[sym].on_trade_placed()
+            if sym in self._zigzag_scorers:
+                self._zigzag_scorers[sym].on_trade_placed()
         logger.info(f"Buy accepted: contract_id={contract_id} | monitoring open contract")
         await self._send(
             {
@@ -805,6 +1060,12 @@ class DerivBot:
             self.hotness_tracker.on_trade_result(symbol, is_win)
         if self.ml_filter is not None:
             self.ml_filter.on_trade_result(symbol, contract_type, trade.timestamp, is_win)
+        # Update NovaBurst Bayesian posterior with trade outcome
+        if symbol in self._novaburst_scorers:
+            self._novaburst_scorers[symbol].on_trade_result(is_win)
+        # Update Ensemble streak momentum
+        if self._current_signal:
+            self.scorer.record_result(self._current_signal.direction, is_win)
         self._trade_count += 1
         self._last_trade_ts = time.time()  # update for adaptive idle bypass
         self._write_app_json()
@@ -978,7 +1239,8 @@ class DerivBot:
 
                 logger.info("═" * 60)
                 logger.info("  Bot is LIVE — listening for signals...")
-                logger.info(f"  Strategy: {self.cfg.strategy}")
+                logger.info(f"  Algorithm: {self.cfg.strategy}")
+                logger.info(f"  Trade Strategy: {self.cfg.trade_strategy}")
                 if self.cfg.strategy == "alphabloom":
                     ab_cfg = self.cfg.alphabloom
                     logger.info(f"  AB window: {ab_cfg.window_size} ticks")
@@ -987,9 +1249,19 @@ class DerivBot:
                     logger.info("  AB trades EVEN or ODD — picks best index")
                 elif self.cfg.strategy == "pulse":
                     p_cfg = self.cfg.pulse
-                    logger.info(f"  Pulse fast: {p_cfg.fast_window} ticks | slow: {p_cfg.slow_window} ticks")
+                    logger.info(f"  Pulse micro: {p_cfg.micro_window} | fast: {p_cfg.fast_window} | slow: {p_cfg.slow_window} ticks")
                     logger.info(f"  Pulse min fast edge: {p_cfg.min_fast_pct:.0%}")
-                    logger.info("  Pulse mode: dual-timeframe, trades when both agree")
+                    logger.info("  Pulse mode: tri-timeframe, trades when fast+slow agree")
+                elif self.cfg.strategy == "novaburst":
+                    nb_cfg = self.cfg.novaburst
+                    logger.info(f"  NovaBurst windows: {nb_cfg.windows}")
+                    logger.info(f"  NovaBurst consensus: {nb_cfg.min_consensus}/{len(nb_cfg.windows)}")
+                    logger.info(f"  NovaBurst Bayesian gate: {nb_cfg.bayesian_gate}")
+                    logger.info(f"  NovaBurst Markov order: {nb_cfg.markov_order}")
+                ts_info = TRADE_STRATEGIES.get(self.cfg.trade_strategy, {})
+                contracts = ts_info.get("contracts", ("?",))
+                logger.info(f"  Contract types: {contracts}")
+                logger.info(f"  Pattern filter: {ts_info.get('pattern', 'none')}")
                 logger.info(f"  Indices: {self.cfg.index.symbols}")
                 logger.info(f"  Base stake: ${self.cfg.martingale.base_stake_usd}")
                 logger.info(f"  Martingale multiplier: x{self.cfg.martingale.multiplier}")
@@ -1077,6 +1349,7 @@ class DerivBot:
             logger.info("  %s", stats.summary())
             if self.ml_filter is not None:
                 logger.info("  %s", self.ml_filter.summary())
+        logger.info(f"  Trade strategy: {self.cfg.trade_strategy}")
         logger.info("═" * 60)
 
 
@@ -1144,9 +1417,17 @@ def main():
     parser.add_argument("--score-threshold", type=float, default=0.60, help="Ensemble score threshold")
     parser.add_argument(
         "--strategy",
-        choices=("ensemble", "alphabloom", "pulse", "adaptive"),
+        choices=("ensemble", "alphabloom", "pulse", "novaburst", "adaptive"),
         default="ensemble",
-        help="Trading strategy: 'ensemble', 'alphabloom', 'pulse', or 'adaptive' (pulse + ML/hotness/vol gates)",
+        help="Algorithm: 'ensemble', 'alphabloom', 'pulse', 'novaburst', or 'adaptive' (pulse + ML/hotness/vol gates)",
+    )
+    parser.add_argument(
+        "--trade-strategy",
+        choices=("even_odd", "rise_fall_roll", "rise_fall_zigzag",
+                 "higher_lower_roll", "higher_lower_zigzag",
+                 "over_under_roll", "touch_notouch_zigzag"),
+        default="even_odd",
+        help="Trade strategy: contract type + pattern filter (default: even_odd)",
     )
     parser.add_argument(
         "--ml-filter",
@@ -1233,6 +1514,7 @@ def main():
     cfg.direction.even_score_bonus = args.even_score_bonus
     cfg.kelly.enabled = not args.disable_kelly
     cfg.strategy = args.strategy
+    cfg.trade_strategy = args.trade_strategy
     cfg.pulse.fast_window = args.pulse_fast
     cfg.pulse.slow_window = args.pulse_slow
     cfg.alphabloom.window_size = args.ab_window

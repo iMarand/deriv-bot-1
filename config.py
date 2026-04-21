@@ -106,8 +106,41 @@ class PulseConfig:
     """Pulse dual-timeframe strategy parameters."""
     fast_window: int = 15              # fast digit window
     slow_window: int = 50              # slow digit window
+    micro_window: int = 7              # micro (ultra-fast) digit window
     min_fast_pct: float = 0.53         # min dominant% in fast window
     cooldown_ticks: int = 1            # ticks to wait after a trade
+
+
+@dataclass
+class RollCakeConfig:
+    """Roll Cake autocorrelation-based cycle detection strategy parameters."""
+    window_size: int = 30              # ticks for pattern analysis
+    min_autocorrelation: float = 0.25  # minimum autocorrelation for valid cycle
+    cycle_lags: tuple = (2, 3, 4, 5, 6)  # cycle lengths to test
+    min_streak: int = 3                # minimum streak length to consider
+    cooldown_ticks: int = 2            # ticks to wait after a trade
+
+
+@dataclass
+class ZigzagConfig:
+    """Zigzag 7-tick reversal detection strategy parameters."""
+    tick_count: int = 7                # ticks per zigzag window
+    min_swings: int = 3                # minimum direction changes for valid zigzag
+    amplitude_threshold: float = 0.0001  # minimum move to count as significant
+    cooldown_ticks: int = 2            # ticks to wait after a trade
+    lookback_buffer: int = 50          # total buffer for additional analysis
+
+
+@dataclass
+class NovaBurstConfig:
+    """NovaBurst multi-layer probabilistic algorithm parameters."""
+    windows: tuple = (10, 25, 60)      # multi-scale analysis windows
+    min_consensus: int = 2             # at least N of len(windows) must agree
+    bayesian_gate: float = 0.55        # posterior P(correct) must exceed this
+    markov_order: int = 2              # N-gram order for transition matrix
+    momentum_decay_window: int = 15    # ticks to measure momentum decay
+    min_warmup: int = 25               # minimum ticks before any signal
+    cooldown_ticks: int = 2            # ticks to wait after a trade
 
 
 @dataclass
@@ -129,6 +162,7 @@ class ContractConfig:
     duration_unit: str = "t"
     currency: str = "USD"
     basis: str = "stake"
+    barrier_offset: float = 0.0        # for higher/lower, touch/notouch
 
 
 @dataclass
@@ -149,6 +183,21 @@ class APIConfig:
     reconnect_delay: float = 5.0        # seconds before reconnect on disconnect
 
 
+# ── Trade Strategy constants ──────────────────────────────────────────────────
+# These map high-level strategy names to Deriv contract types.
+TRADE_STRATEGIES = {
+    "even_odd":              {"contracts": ("DIGITEVEN", "DIGITODD"), "pattern": None, "duration": 5},
+    "rise_fall_roll":        {"contracts": ("CALL", "PUT"),          "pattern": "rollcake", "duration": 5},
+    "rise_fall_zigzag":      {"contracts": ("CALL", "PUT"),          "pattern": "zigzag",   "duration": 7},
+    "higher_lower_roll":     {"contracts": ("CALL", "PUT"),          "pattern": "rollcake", "duration": 5, "barrier": True},
+    "higher_lower_zigzag":   {"contracts": ("CALL", "PUT"),          "pattern": "zigzag",   "duration": 7, "barrier": True},
+    "over_under_roll":       {"contracts": ("DIGITOVER", "DIGITUNDER"), "pattern": "rollcake", "duration": 5, "digit_barrier": True},
+    "touch_notouch_zigzag":  {"contracts": ("ONETOUCH", "NOTOUCH"),  "pattern": "zigzag",   "duration": 7, "barrier": True},
+}
+
+TRADE_STRATEGY_CHOICES = list(TRADE_STRATEGIES.keys())
+
+
 @dataclass
 class BotConfig:
     """Master configuration aggregating all sub-configs."""
@@ -163,8 +212,12 @@ class BotConfig:
     shadow: ShadowConfig = field(default_factory=ShadowConfig)
     alphabloom: AlphaBloomConfig = field(default_factory=AlphaBloomConfig)
     pulse: PulseConfig = field(default_factory=PulseConfig)
+    rollcake: RollCakeConfig = field(default_factory=RollCakeConfig)
+    zigzag: ZigzagConfig = field(default_factory=ZigzagConfig)
+    novaburst: NovaBurstConfig = field(default_factory=NovaBurstConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
     direction: DirectionPreferenceConfig = field(default_factory=DirectionPreferenceConfig)
     api: APIConfig = field(default_factory=APIConfig)
-    strategy: str = "ensemble"  # "ensemble", "alphabloom", or "pulse"
+    strategy: str = "ensemble"           # algorithm: "ensemble", "alphabloom", "pulse", "novaburst", "adaptive"
+    trade_strategy: str = "even_odd"     # contract strategy: see TRADE_STRATEGIES

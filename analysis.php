@@ -106,8 +106,10 @@ if (isset($_GET['api'])) {
         $martingale= floatval($body['martingale']   ?? 2.2);
         $maxStake  = floatval($body['max_stake']    ?? 50.0);
         $threshold = floatval($body['threshold']    ?? 0.60);
-        $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble','adaptive'])
+        $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble','adaptive','novaburst'])
                      ? $body['strategy'] : 'alphabloom';
+        $tradeStrategy = in_array($body['trade_strategy']??'', ['even_odd','rise_fall_roll','rise_fall_zigzag','higher_lower_roll','higher_lower_zigzag','over_under_roll','touch_notouch_zigzag'])
+                         ? $body['trade_strategy'] : 'even_odd';
         $abWindow  = intval($body['ab_window'] ?? 60);
         $disKelly  = !empty($body['disable_kelly']);
         $disRisk   = !empty($body['disable_risk']);
@@ -125,8 +127,8 @@ if (isset($_GET['api'])) {
                      ? floatval($body['loss_limit']) : null;
 
         $cmd = sprintf(
-            "python3 bot.py --token %s --account-mode %s --base-stake %.2f --martingale %.2f --max-stake %.2f --score-threshold %.2f --strategy %s",
-            escapeshellarg($token), $mode, $stake, $martingale, $maxStake, $threshold, $strategy
+            "python3 bot.py --token %s --account-mode %s --base-stake %.2f --martingale %.2f --max-stake %.2f --score-threshold %.2f --strategy %s --trade-strategy %s",
+            escapeshellarg($token), $mode, $stake, $martingale, $maxStake, $threshold, $strategy, $tradeStrategy
         );
         if ($strategy === 'alphabloom') $cmd .= " --ab-window $abWindow";
         if ($disKelly)  $cmd .= " --disable-kelly";
@@ -469,6 +471,9 @@ canvas{width:100%!important;max-height:280px}
 .badge{display:inline-block;padding:2px 7px;border-radius:4px;font-size:.68rem;font-weight:700;letter-spacing:.02em}
 .badge-win{background:var(--green2);color:var(--green)}.badge-loss{background:var(--red2);color:var(--red)}
 .badge-odd{background:#b388ff20;color:var(--purple)}.badge-even{background:var(--blue2);color:var(--blue)}
+.badge-call{background:#18ffff20;color:var(--cyan)}.badge-put{background:#ffab4020;color:var(--amber)}
+.badge-over{background:#00e67620;color:var(--green3)}.badge-under{background:#ff525220;color:var(--red)}
+.badge-touch{background:#448aff20;color:var(--blue)}.badge-notouch{background:#b388ff20;color:var(--purple)}
 
 /* ── BOT CONTROL ── */
 .control-wrap{display:grid;grid-template-columns:1fr 1fr;gap:20px;align-items:start}
@@ -723,13 +728,27 @@ canvas{width:100%!important;max-height:280px}
               <span class="hint">Min signal confidence (0–1)</span>
             </div>
             <div class="form-group">
-              <label>Strategy</label>
+              <label>Algorithm</label>
               <select id="fStrategy" onchange="onStrategyChange(); updateCmd()">
                 <option value="alphabloom" selected>AlphaBloom</option>
-                <option value="pulse">Pulse (dual-timeframe)</option>
+                <option value="pulse">Pulse (tri-timeframe)</option>
                 <option value="ensemble">Ensemble</option>
+                <option value="novaburst">NovaBurst (multi-layer)</option>
                 <option value="adaptive">Adaptive (Pulse + ML + hotness + vol)</option>
               </select>
+            </div>
+            <div class="form-group">
+              <label>Trade Strategy</label>
+              <select id="fTradeStrategy" onchange="updateCmd()">
+                <option value="even_odd" selected>Even/Odd (Digit Frequency)</option>
+                <option value="rise_fall_roll">Rise/Fall — Roll Cake</option>
+                <option value="rise_fall_zigzag">Rise/Fall — Zigzag 7 Ticks</option>
+                <option value="higher_lower_roll">Higher/Lower — Roll Cake</option>
+                <option value="higher_lower_zigzag">Higher/Lower — Zigzag 7 Ticks</option>
+                <option value="over_under_roll">Over/Under — Roll Cake</option>
+                <option value="touch_notouch_zigzag">Touch/No Touch — Zigzag 7 Ticks</option>
+              </select>
+              <span class="hint" id="hTradeStrategy">Contract type + pattern filter</span>
             </div>
             <div class="form-group" id="mlThresholdGroup" style="display:none">
               <label>ML Threshold</label>
@@ -1103,7 +1122,7 @@ function renderDashboard() {
   document.getElementById('tradeBody').innerHTML = trades.map(t => {
     cum += t.profit;
     const win = t.result==='win', pc2 = win?'c-green':'c-red', ps = t.profit>=0?'+':'', cs = cum>=0?'+':'';
-    const typeBadge = t.contract_type.includes('ODD') ? '<span class="badge badge-odd">ODD</span>' : '<span class="badge badge-even">EVEN</span>';
+    const typeBadge = contractBadge(t.contract_type);
     return `<tr>
       <td>${t.trade_no}</td>
       <td style="font-size:.7rem">${fmtTs(t.timestamp)}</td>
@@ -1212,6 +1231,19 @@ function syncMlThresholdVisibility() {
     (s === 'adaptive' || mlOn) ? '' : 'none';
 }
 
+function contractBadge(ct) {
+  if (!ct) return '<span class="badge">—</span>';
+  if (ct.includes('ODD'))   return '<span class="badge badge-odd">ODD</span>';
+  if (ct.includes('EVEN'))  return '<span class="badge badge-even">EVEN</span>';
+  if (ct === 'CALL')        return '<span class="badge badge-call">CALL ↑</span>';
+  if (ct === 'PUT')         return '<span class="badge badge-put">PUT ↓</span>';
+  if (ct === 'DIGITOVER')   return '<span class="badge badge-over">OVER</span>';
+  if (ct === 'DIGITUNDER')  return '<span class="badge badge-under">UNDER</span>';
+  if (ct === 'ONETOUCH')    return '<span class="badge badge-touch">TOUCH</span>';
+  if (ct === 'NOTOUCH')     return '<span class="badge badge-notouch">NO TOUCH</span>';
+  return `<span class="badge">${ct}</span>`;
+}
+
 function buildParams() {
   const token     = document.getElementById('fToken').value.trim() || 'gY5gbEpJVhih5NL';
   const stake     = parseFloat(document.getElementById('fStake').value) || 0.35;
@@ -1219,6 +1251,7 @@ function buildParams() {
   const maxStake  = parseFloat(document.getElementById('fMaxStake').value) || 50;
   const thr       = parseFloat(document.getElementById('fThreshold').value) || 0.60;
   const strategy  = document.getElementById('fStrategy').value;
+  const tradeStrategy = document.getElementById('fTradeStrategy').value;
   const abWindow  = parseInt(document.getElementById('fAbWindow').value) || 60;
   const disKelly  = document.getElementById('tKelly').checked;
   const disRisk   = document.getElementById('tRisk').checked;
@@ -1234,7 +1267,8 @@ function buildParams() {
   const profit    = profitRaw !== '' ? parseFloat(profitRaw) : null;
   const loss      = lossRaw  !== '' ? parseFloat(lossRaw)  : null;
   return { token, mode:currentMode, base_stake:stake, martingale:mart, max_stake:maxStake,
-           threshold:thr, strategy, ab_window:abWindow, disable_kelly:disKelly,
+           threshold:thr, strategy, trade_strategy:tradeStrategy,
+           ab_window:abWindow, disable_kelly:disKelly,
            disable_risk:disRisk, ml_filter:mlOn,
            ml_threshold: isNaN(mlThr) ? null : mlThr,
            hotness_cold: hotCold, hotness_probe: hotProbe,
@@ -1259,10 +1293,24 @@ function updateCmd() {
   // Keep ML threshold visibility in sync with its trigger conditions
   syncMlThresholdVisibility();
 
+  // Trade strategy hint
+  const tsHints = {
+    even_odd: 'DIGITEVEN/DIGITODD — 5 ticks',
+    rise_fall_roll: 'CALL/PUT + Roll Cake pattern — 5 ticks',
+    rise_fall_zigzag: 'CALL/PUT + Zigzag reversal — 7 ticks',
+    higher_lower_roll: 'CALL/PUT + barrier + Roll Cake — 5 ticks',
+    higher_lower_zigzag: 'CALL/PUT + barrier + Zigzag — 7 ticks',
+    over_under_roll: 'DIGITOVER/DIGITUNDER + Roll Cake — 5 ticks',
+    touch_notouch_zigzag: 'ONETOUCH/NOTOUCH + barrier + Zigzag — 7 ticks',
+  };
+  const hintEl2 = document.getElementById('hTradeStrategy');
+  if (hintEl2) hintEl2.textContent = tsHints[p.trade_strategy] || 'Contract type + pattern filter';
+
   let cmd = `python3 bot.py --token <span>${tokenDisplay}</span> --account-mode ${p.mode}`;
   cmd += ` --base-stake ${p.base_stake.toFixed(2)} --martingale ${p.martingale.toFixed(1)}`;
   cmd += ` --max-stake ${p.max_stake.toFixed(0)}`;
   cmd += ` --score-threshold ${p.threshold.toFixed(2)} --strategy ${p.strategy}`;
+  cmd += ` --trade-strategy ${p.trade_strategy}`;
   if (p.strategy === 'alphabloom') cmd += ` --ab-window ${p.ab_window}`;
   if (p.disable_kelly)  cmd += ' --disable-kelly';
   if (p.disable_risk)   cmd += ' --disable-risk-engine';
