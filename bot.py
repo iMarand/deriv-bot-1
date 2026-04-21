@@ -838,15 +838,21 @@ class DerivBot:
         zz = self._zigzag_scorers.get(symbol)
         vt = self._vol_trackers.get(symbol)
 
+        is_touch = ts in ("touch_notouch_zigzag",)
+
         if zz and zz.warmed:
             current = zz.current_price
             high = zz.recent_high
             low = zz.recent_low
             spread = high - low
-            if spread > 0:
-                # For HIGHER: barrier slightly above current
-                # For TOUCH: barrier at recent high/low
-                offset = spread * 0.3 + self.cfg.contract.barrier_offset
+            if spread > 0 and current:
+                if is_touch:
+                    # ONETOUCH/NOTOUCH require barrier far enough from spot.
+                    # Use 2× recent spread, floored at 1% of current price.
+                    min_offset = current * 0.01
+                    offset = max(spread * 2.0, min_offset) + self.cfg.contract.barrier_offset
+                else:
+                    offset = spread * 0.3 + self.cfg.contract.barrier_offset
                 return round(current + offset, 2)
 
         # Fallback: use ATR if available
@@ -854,7 +860,12 @@ class DerivBot:
             prices = list(vt.prices)
             if prices:
                 current = prices[-1]
-                return round(current + vt.atr * 0.5, 2)
+                if is_touch:
+                    min_offset = current * 0.01
+                    offset = max(vt.atr * 2.0, min_offset)
+                else:
+                    offset = vt.atr * 0.5
+                return round(current + offset, 2)
 
         return None
 
@@ -900,6 +911,7 @@ class DerivBot:
         # Determine duration from trade strategy
         ts_info = TRADE_STRATEGIES.get(self.cfg.trade_strategy, {})
         duration = ts_info.get("duration", self.cfg.contract.duration)
+        duration_unit = ts_info.get("duration_unit_override", self.cfg.contract.duration_unit)
 
         proposal = {
             "proposal": 1,
@@ -908,7 +920,7 @@ class DerivBot:
             "contract_type": contract_type,
             "currency": self.cfg.contract.currency,
             "duration": duration,
-            "duration_unit": self.cfg.contract.duration_unit,
+            "duration_unit": duration_unit,
             "symbol": symbol,
         }
 
@@ -939,7 +951,7 @@ class DerivBot:
         self._active_contract_expected_seconds = estimate_contract_seconds(
             symbol,
             duration,
-            self.cfg.contract.duration_unit,
+            duration_unit,
         )
 
         barrier_str = ""
