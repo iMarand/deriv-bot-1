@@ -847,14 +847,14 @@ class DerivBot:
                 # For HIGHER: barrier slightly above current
                 # For TOUCH: barrier at recent high/low
                 offset = spread * 0.3 + self.cfg.contract.barrier_offset
-                return round(current + offset, 4)
+                return round(current + offset, 2)
 
         # Fallback: use ATR if available
         if vt and vt.atr is not None:
             prices = list(vt.prices)
             if prices:
                 current = prices[-1]
-                return round(current + vt.atr * 0.5, 4)
+                return round(current + vt.atr * 0.5, 2)
 
         return None
 
