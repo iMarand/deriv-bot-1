@@ -265,7 +265,8 @@ class DerivBot:
             )
             return
 
-        best_symbol = self._last_best_symbol or max(self._symbol_scores, key=self._symbol_scores.get, default=None)
+        valid_scores = {s: v for s, v in self._symbol_scores.items() if s in self._hot_symbols}
+        best_symbol = self._last_best_symbol or max(valid_scores, key=valid_scores.get, default=None)
         if best_symbol is None:
             return
 
@@ -525,6 +526,8 @@ class DerivBot:
         best_rank: float = -1.0
 
         for s, s_ab in self._ab_scorers.items():
+            if s not in self._hot_symbols:
+                continue
             if not s_ab.warmed:
                 continue
             s_rd = self._regime_detectors.get(s)
@@ -588,6 +591,8 @@ class DerivBot:
         best_score: float = -1.0
 
         for s, s_ps in self._pulse_scorers.items():
+            if s not in self._hot_symbols:
+                continue
             if not s_ps.warmed:
                 continue
             s_rd = self._regime_detectors.get(s)
@@ -645,6 +650,8 @@ class DerivBot:
         best_score: float = -1.0
 
         for s, s_nb in self._novaburst_scorers.items():
+            if s not in self._hot_symbols:
+                continue
             if not s_nb.warmed:
                 continue
             s_rd = self._regime_detectors.get(s)
@@ -1152,7 +1159,6 @@ class DerivBot:
             {
                 "proposal_open_contract": 1,
                 "contract_id": int(self.active_contract),
-                "subscribe": 0,
             }
         )
         stale_for = (
