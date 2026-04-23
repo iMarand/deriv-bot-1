@@ -61,36 +61,49 @@ def recommend_for_symbol(d, allowed_algos, allowed_ts):
     vol_level = v.get('level', 'UNKNOWN')
     bias_mag = dg.get('bias_magnitude', 0)
     
-    if vol_level == 'EXTREME': return None
-    if vol_level == 'HIGH':
-        if dg.get('is_biased') and bias_mag >= 0.10 and p.get('pulse', {}).get('score', 0) >= 0.65:
-            return match_filter([{'a':'pulse','t':'even_odd','s':'GOOD_ENTRY'}], allowed_algos, allowed_ts)
-        return None
-        
-    candidates = []
     ps = p.get('pulse', {}).get('score', 0)
     rs = p.get('rollcake', {}).get('score', 0)
-    regime = d.get('regime', 'UNKNOWN')
+    zs = p.get('zigzag', {}).get('score', 0)
     
-    if regime == 'MEAN_REVERTING' and vol_level in ['LOW', 'MODERATE']:
-        if dg.get('is_biased') and bias_mag >= 0.06 and ps >= 0.6: candidates.append({'a':'pulse','t':'even_odd','s':'STRONG_ENTRY'})
-        if dg.get('is_biased') and bias_mag >= 0.06 and ps >= 0.4: candidates.append({'a':'pulse','t':'even_odd','s':'GOOD_ENTRY'})
-        if dg.get('is_biased') and bias_mag >= 0.06: candidates.append({'a':'alphabloom','t':'even_odd','s':'GOOD_ENTRY'})
-        if rs >= 0.70 and vol_level == 'LOW': candidates.append({'a':'pulse','t':'rise_fall_roll','s':'GOOD_ENTRY'})
-        candidates.append({'a':'ensemble','t':'even_odd','s':'WAIT'})
+    candidates = []
+    
+    if vol_level == 'EXTREME':
+        return match_filter([{'a': a, 't': t, 's': 'DO_NOT_ENTER'} for a in allowed_algos for t in allowed_ts], allowed_algos, allowed_ts)
         
-    if regime == 'TRENDING':
-        if dg.get('is_biased') and ps >= 0.55: candidates.append({'a':'pulse','t':'even_odd','s':'GOOD_ENTRY'})
-        if dg.get('is_biased') and bias_mag >= 0.08: candidates.append({'a':'alphabloom','t':'even_odd','s':'GOOD_ENTRY'})
-        if vol_level == 'LOW' and rs >= 0.70: candidates.append({'a':'pulse','t':'rise_fall_roll','s':'GOOD_ENTRY'})
-        candidates.append({'a':'adaptive','t':'even_odd','s':'WAIT'})
-        
-    if regime == 'CHOPPY':
-        if dg.get('is_biased') and bias_mag >= 0.08 and ps >= 0.55: candidates.append({'a':'pulse','t':'even_odd','s':'GOOD_ENTRY'})
-        candidates.append({'a':'adaptive','t':'even_odd','s':'WAIT'})
-        
-    if dg.get('is_biased') and ps >= 0.55: candidates.append({'a':'pulse','t':'even_odd','s':'GOOD_ENTRY'})
-    candidates.append({'a':'adaptive','t':'even_odd','s':'WAIT'})
+    for a in allowed_algos:
+        for t in allowed_ts:
+            s = 'WAIT'
+            
+            # Base algorithm conditions
+            algo_ready = False
+            if a in ['pulse', 'ensemble', 'novaburst', 'adaptive']:
+                if dg.get('is_biased') and ps >= 0.55:
+                    algo_ready = True
+            elif a == 'alphabloom':
+                if dg.get('is_biased') and bias_mag >= 0.08:
+                    algo_ready = True
+                    
+            # Trade strategy conditions
+            ts_ready = False
+            if t == 'even_odd':
+                ts_ready = True # even_odd only requires algo_ready
+            elif 'roll' in t:
+                if rs >= 0.70 and vol_level in ['LOW', 'MODERATE']:
+                    ts_ready = True
+            elif 'zigzag' in t:
+                if zs >= 0.70 and vol_level in ['LOW', 'MODERATE']:
+                    ts_ready = True
+                    
+            if algo_ready and ts_ready:
+                s = 'GOOD_ENTRY'
+                if a == 'pulse' and ps >= 0.65 and vol_level != 'HIGH':
+                    s = 'STRONG_ENTRY'
+                    
+            candidates.append({'a': a, 't': t, 's': s})
+            
+    # Sort candidates so STRONG_ENTRY > GOOD_ENTRY > WAIT
+    rank = {'STRONG_ENTRY': 3, 'GOOD_ENTRY': 2, 'WAIT': 1, 'DO_NOT_ENTER': 0}
+    candidates.sort(key=lambda x: rank[x['s']], reverse=True)
     
     return match_filter(candidates, allowed_algos, allowed_ts)
 

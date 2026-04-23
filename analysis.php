@@ -2687,33 +2687,43 @@ function recommendForSymbol(d) {
   const allowedTS=[...document.querySelectorAll('.tsFilterChk:checked')].map(c=>c.value);
   const v=d.volatility||{}, dg=d.digits||{}, p=d.patterns||{};
   const volLevel=v.level||'UNKNOWN', trad=d.tradability||0, biasMag=dg.bias_magnitude||0;
-  const pickAlgo=pref=>allowedAlgos.includes(pref)?pref:(allowedAlgos[0]||'adaptive');
-  const pickTS=pref=>allowedTS.includes(pref)?pref:(allowedTS[0]||'even_odd');
-  if (volLevel==='EXTREME') return {algorithm:pickAlgo('adaptive'),trade_strategy:pickTS('even_odd'),entry_signal:'DO_NOT_ENTER',tradability:trad};
-  if (volLevel==='HIGH') {
-    if (dg.is_biased && biasMag>=0.10 && (p.pulse?.score||0)>=0.65) return matchFilter([{a:'pulse',t:'even_odd',s:'GOOD_ENTRY'}],allowedAlgos,allowedTS,trad);
-    return {algorithm:pickAlgo('adaptive'),trade_strategy:pickTS('even_odd'),entry_signal:'DO_NOT_ENTER',tradability:trad};
+  
+  if (volLevel==='EXTREME') return matchFilter([{a:allowedAlgos[0],t:allowedTS[0],s:'DO_NOT_ENTER'}],allowedAlgos,allowedTS,trad);
+  
+  const ps=p.pulse?.score||0, rs=p.rollcake?.score||0, zs=p.zigzag?.score||0;
+  const candidates=[];
+  
+  for (const a of allowedAlgos) {
+    for (const t of allowedTS) {
+      let s = 'WAIT';
+      let algoReady = false;
+      
+      if (['pulse', 'ensemble', 'novaburst', 'adaptive'].includes(a)) {
+        if (dg.is_biased && ps >= 0.55) algoReady = true;
+      } else if (a === 'alphabloom') {
+        if (dg.is_biased && biasMag >= 0.08) algoReady = true;
+      }
+      
+      let tsReady = false;
+      if (t === 'even_odd') {
+        tsReady = true;
+      } else if (t.includes('roll')) {
+        if (rs >= 0.70 && ['LOW', 'MODERATE'].includes(volLevel)) tsReady = true;
+      } else if (t.includes('zigzag')) {
+        if (zs >= 0.70 && ['LOW', 'MODERATE'].includes(volLevel)) tsReady = true;
+      }
+      
+      if (algoReady && tsReady) {
+        s = 'GOOD_ENTRY';
+        if (a === 'pulse' && ps >= 0.65 && volLevel !== 'HIGH') s = 'STRONG_ENTRY';
+      }
+      candidates.push({a: a, t: t, s: s});
+    }
   }
-  const candidates=[], ps=p.pulse?.score||0, rs=p.rollcake?.score||0, zs=p.zigzag?.score||0, regime=d.regime||'UNKNOWN';
-  if (regime==='MEAN_REVERTING' && (volLevel==='LOW'||volLevel==='MODERATE')) {
-    if (dg.is_biased && biasMag>=0.06 && ps>=0.6) candidates.push({a:'pulse',t:'even_odd',s:'STRONG_ENTRY'});
-    if (dg.is_biased && biasMag>=0.06 && ps>=0.4) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-    if (dg.is_biased && biasMag>=0.06) candidates.push({a:'alphabloom',t:'even_odd',s:'GOOD_ENTRY'});
-    if (rs>=0.70 && volLevel==='LOW') candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
-    candidates.push({a:'ensemble',t:'even_odd',s:'WAIT'});
-  }
-  if (regime==='TRENDING') {
-    if (dg.is_biased && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-    if (dg.is_biased && biasMag>=0.08) candidates.push({a:'alphabloom',t:'even_odd',s:'GOOD_ENTRY'});
-    if (volLevel==='LOW' && rs>=0.70) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
-    candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
-  }
-  if (regime==='CHOPPY') {
-    if (dg.is_biased && biasMag>=0.08 && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-    candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
-  }
-  if (dg.is_biased && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-  candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
+  
+  const rank = {'STRONG_ENTRY': 3, 'GOOD_ENTRY': 2, 'WAIT': 1, 'DO_NOT_ENTER': 0};
+  candidates.sort((x, y) => rank[y.s] - rank[x.s]);
+  
   return matchFilter(candidates,allowedAlgos,allowedTS,trad);
 }
 
