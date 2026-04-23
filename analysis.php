@@ -1812,23 +1812,33 @@ function renderCharts(trades, curve, initEq, silent = false) {
         animation: { duration: 600 },
         plugins: {
           legend: { position: 'bottom', labels: { color: TICK_COLOR, font: { family: CHART_FONT, size: 12 }, padding: 16 } },
-        tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.raw} (${((ctx.raw/trades.length)*100).toFixed(1)}%)` } }
+          tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.raw} (${((ctx.raw/trades.length)*100).toFixed(1)}%)` } }
+        }
       }
-    }
-  });
+    });
+  }
 
   // Stake progression
-  charts.stake = new Chart(document.getElementById('stakeChart').getContext('2d'), {
-    type: 'bar',
-    data: {
-      labels,
-      datasets: [{ data: trades.map(t=>t.stake), backgroundColor: pointColors.map(c=>c+'90'), borderColor: pointColors, borderWidth:1, borderRadius:2 }]
-    },
-    options: {
-      ...baseOpts(160),
-      animation: { duration: 300 }
-    }
-  });
+  const stakeVals = trades.map(t=>t.stake);
+  if (silent && charts.stake) {
+    charts.stake.data.labels = labels;
+    charts.stake.data.datasets[0].data = stakeVals;
+    charts.stake.data.datasets[0].backgroundColor = pointColors.map(c=>c+'90');
+    charts.stake.data.datasets[0].borderColor = pointColors;
+    charts.stake.update('none');
+  } else {
+    charts.stake = new Chart(document.getElementById('stakeChart').getContext('2d'), {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{ data: stakeVals, backgroundColor: pointColors.map(c=>c+'90'), borderColor: pointColors, borderWidth:1, borderRadius:2 }]
+      },
+      options: {
+        ...baseOpts(160),
+        animation: { duration: 300 }
+      }
+    });
+  }
 }
 
 // ─── STREAKS ─────────────────────────────────────────────────────────────────
