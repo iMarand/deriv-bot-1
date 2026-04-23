@@ -94,8 +94,13 @@ def recommend_for_symbol(d, allowed_algos, allowed_ts):
     
     return match_filter(candidates, allowed_algos, allowed_ts)
 
-def restart_bot(base_cmd, algo, ts, symbols):
-    logger.info(f"Restarting bot with {algo} / {ts} on {len(symbols)} symbols")
+def ensure_bot_running(base_cmd, algo, ts):
+    # Check if running
+    res = subprocess.run(f"tmux has-session -t ={TMUX_NAME} 2>/dev/null", shell=True)
+    if res.returncode == 0:
+        return # Already running, hot-reload will handle it via manager_state.json
+
+    logger.info(f"Bot not running. Starting bot...")
     
     cmd = base_cmd
     import re
@@ -103,22 +108,19 @@ def restart_bot(base_cmd, algo, ts, symbols):
     cmd = re.sub(r'--trade-strategy \S+', '', cmd)
     cmd = re.sub(r'--symbols.*', '', cmd) # Remove trailing symbols if any
     
+    # Start with ALL symbols so bot.py warms them all up. 
+    # The hot-reload mechanism will restrict trading to only the active ones.
+    all_symbols = ["R_10","R_25","R_50","R_75","R_100","1HZ10V","1HZ25V","1HZ50V","1HZ75V","1HZ100V"]
+    
     cmd += f" --strategy {algo} --trade-strategy {ts}"
-    cmd += " --symbols " + " ".join(symbols)
+    cmd += " --symbols " + " ".join(all_symbols)
     
     launcher_path = Path(__file__).parent / ".launcher.sh"
-    script = f"#!/bin/bash\ncd {Path(__file__).parent.absolute()}\necho 'Auto-Manager Restart: {cmd}'\n{cmd}\nEXIT=$?\necho 'Exited ($EXIT)'\nread\n"
+    script = f"#!/bin/bash\ncd {Path(__file__).parent.absolute()}\necho 'Auto-Manager Started Bot: {cmd}'\n{cmd}\nEXIT=$?\necho 'Exited ($EXIT)'\nread\n"
     
     with open(launcher_path, "w") as f:
         f.write(script)
     os.chmod(launcher_path, 0o755)
-    
-    # Kill existing
-    subprocess.run(f"tmux send-keys -t ={TMUX_NAME} C-c 2>&1", shell=True, capture_output=True)
-    time.sleep(1)
-    subprocess.run(f"tmux kill-session -t ={TMUX_NAME} 2>&1", shell=True, capture_output=True)
-    subprocess.run("pkill -9 -f \" bot\\.py\" 2>&1", shell=True, capture_output=True)
-    time.sleep(1)
     
     # Start new
     subprocess.run(f"tmux new-session -d -s {TMUX_NAME} bash {launcher_path.absolute()}", shell=True)
@@ -178,15 +180,19 @@ def main():
             
             if best_algo != current_algo or best_ts != current_ts or set(best_symbols) != set(current_symbols):
                 logger.info(f"Configuration change detected! New config: {best_algo} / {best_ts} on {len(best_symbols)} symbols")
-                restart_bot(base_cmd, best_algo, best_ts, best_symbols)
                 
                 current_algo = best_algo
                 current_ts = best_ts
                 current_symbols = best_symbols
                 
+                # Write state FIRST so that when ensure_bot_running launches the bot, 
+                # the bot immediately reads the updated state file to filter symbols.
                 write_state(f"Running {best_algo} ({best_ts}) on {len(best_symbols)} symbols", current_algo, current_ts, current_symbols)
+                ensure_bot_running(base_cmd, best_algo, best_ts)
             else:
                 write_state(f"Monitoring stable. {best_algo} on {len(best_symbols)} symbols.", current_algo, current_ts, current_symbols)
+                # Ensure the bot didn't crash in the background
+                ensure_bot_running(base_cmd, best_algo, best_ts)
                 
         except Exception as e:
             logger.error(f"Error in main loop: {e}")

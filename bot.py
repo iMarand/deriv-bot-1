@@ -150,6 +150,8 @@ class DerivBot:
         self._account_loginid: Optional[str] = None
         self._account_currency: Optional[str] = None
         self._account_fullname: Optional[str] = None
+        
+        self._hot_symbols = set(self.cfg.index.symbols)
 
         # Trade log
         self.trade_history: list[TradeRecord] = []
@@ -469,6 +471,11 @@ class DerivBot:
         # Don't trade if we already have an active contract
         if self.active_contract:
             self._set_symbol_status(symbol, f"waiting on active contract {self.active_contract}")
+            return None
+
+        # Auto-Manager hot-reload filter
+        if symbol not in self._hot_symbols:
+            self._set_symbol_status(symbol, "blocked by auto-manager (not in hot symbols)")
             return None
 
         # Time filter
@@ -1232,9 +1239,43 @@ class DerivBot:
     # ─────────────────────────────────────
     # Run loop
     # ─────────────────────────────────────
+    async def _watch_manager_state(self) -> None:
+        """Background task to hot-reload configuration from auto-manager."""
+        state_file = Path(__file__).parent / "data" / "manager_state.json"
+        last_ts = 0.0
+        while self._running:
+            try:
+                if state_file.exists():
+                    mtime = state_file.stat().st_mtime
+                    if mtime > last_ts:
+                        last_ts = mtime
+                        with open(state_file, "r") as f:
+                            state = json.load(f)
+                        
+                        algo = state.get("algorithm")
+                        if algo and algo != self.cfg.strategy:
+                            logger.info(f"Hot-reloading algorithm: {self.cfg.strategy} -> {algo}")
+                            self.cfg.strategy = algo
+                            
+                        ts = state.get("trade_strategy")
+                        if ts and ts != self.cfg.trade_strategy:
+                            logger.info(f"Hot-reloading trade strategy: {self.cfg.trade_strategy} -> {ts}")
+                            self.cfg.trade_strategy = ts
+                            
+                        syms = state.get("symbols")
+                        if syms and set(syms) != self._hot_symbols:
+                            logger.info(f"Hot-reloading allowed symbols: {self._hot_symbols} -> {set(syms)}")
+                            self._hot_symbols = set(syms)
+            except Exception as e:
+                logger.debug(f"Error reading manager_state.json: {e}")
+            await asyncio.sleep(2)
+
     async def run(self) -> None:
+        """Main execution loop."""
         self._running = True
         retry_count = 0
+        
+        watch_task = asyncio.create_task(self._watch_manager_state())
 
         while self._running:
             try:
@@ -1332,6 +1373,10 @@ class DerivBot:
                 await asyncio.sleep(min(self.cfg.api.reconnect_delay * retry_count, 60))
             finally:
                 await self.close()
+
+        watch_task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await watch_task
 
         logger.info("Bot shut down")
         self._write_app_json()
