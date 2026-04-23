@@ -2259,7 +2259,6 @@ async function refreshFromDaemon() {
     if (data.error) { alert(data.error); return; }
     const results=data.results||[];
     scanResults=[];
-    const grid=document.getElementById('scanResults'), wrap=document.getElementById('scanResultsWrap');
     grid.innerHTML=''; wrap.style.display='';
     results.forEach(d => {
       d.recommendation=recommendForSymbol(d); d.type='result'; d.status=d.status||'OK';
