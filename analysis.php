@@ -126,10 +126,23 @@ if (isset($_GET['api'])) {
         $lossLim   = isset($body['loss_limit']) && $body['loss_limit'] !== '' && $body['loss_limit'] !== null
                      ? floatval($body['loss_limit']) : null;
 
+        // Symbols to trade on (from scanner selection or manual)
+        $symbolsRaw = $body['symbols'] ?? [];
+        $allowedSymbols = ['R_10','R_25','R_50','R_75','R_100','1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V'];
+        $selectedSymbols = [];
+        if (is_array($symbolsRaw) && count($symbolsRaw) > 0) {
+            foreach ($symbolsRaw as $s) {
+                if (in_array($s, $allowedSymbols)) $selectedSymbols[] = $s;
+            }
+        }
+
         $cmd = sprintf(
             "python3 bot.py --token %s --account-mode %s --base-stake %.2f --martingale %.2f --max-stake %.2f --score-threshold %.2f --strategy %s --trade-strategy %s",
             escapeshellarg($token), $mode, $stake, $martingale, $maxStake, $threshold, $strategy, $tradeStrategy
         );
+        if (count($selectedSymbols) > 0) {
+            $cmd .= ' --symbols ' . implode(' ', array_map('escapeshellarg', $selectedSymbols));
+        }
         if ($strategy === 'alphabloom') $cmd .= " --ab-window $abWindow";
         if ($disKelly)  $cmd .= " --disable-kelly";
         if ($disRisk)   $cmd .= " --disable-risk-engine";
@@ -869,6 +882,19 @@ canvas{width:100%!important;max-height:280px}
             </div>
           </div>
 
+          <!-- Symbol Selection -->
+          <div style="margin-top:16px">
+            <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">
+              <div style="font-size:.7rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);font-weight:600">Trade Symbols <span id="symSelectedCount" style="color:var(--text3);font-weight:400"></span></div>
+              <div style="display:flex;gap:6px">
+                <button type="button" onclick="symSelectAll(true)" style="font-size:.68rem;padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer">All</button>
+                <button type="button" onclick="symSelectAll(false)" style="font-size:.68rem;padding:3px 8px;background:var(--bg3);border:1px solid var(--border);color:var(--text2);border-radius:4px;cursor:pointer">None</button>
+              </div>
+            </div>
+            <div style="display:flex;flex-wrap:wrap;gap:6px" id="symChecklist"></div>
+            <span class="hint" style="margin-top:6px;display:block">Uncheck symbols to exclude them. Scanner can auto-update this.</span>
+          </div>
+
           <!-- Toggles -->
           <div style="margin-top:16px;background:var(--bg3);border-radius:var(--radius-sm);padding:4px 14px">
             <div class="toggle-row">
@@ -1041,27 +1067,65 @@ canvas{width:100%!important;max-height:280px}
     <div class="ctrl-box" style="margin-bottom:18px">
       <h3>&#128269; Market Volatility Scanner</h3>
       <div style="font-size:.8rem;color:var(--text2);margin-bottom:16px;line-height:1.6">
-        Scans all synthetic indices in real-time: analyses volatility regime, digit bias, and pattern signals (Pulse, Roll Cake, Zigzag) to recommend the best strategy and entry timing.
+        Scans all synthetic indices in real-time. Analyses volatility regime, digit bias, and pattern signals to recommend strategy and entry timing. Results auto-update symbol selection in Bot Control.
       </div>
-      <div class="form-grid" style="max-width:500px">
+      <div class="form-grid" style="max-width:700px">
         <div class="form-group">
           <label>Lookback Period</label>
           <select id="fScanHours">
+            <option value="0.033">2 minutes</option>
+            <option value="0.083">5 minutes</option>
+            <option value="0.167">10 minutes</option>
+            <option value="0.25">15 minutes</option>
+            <option value="0.333">20 minutes</option>
             <option value="0.5">30 minutes</option>
+            <option value="0.75">45 minutes</option>
             <option value="1" selected>1 hour</option>
             <option value="2">2 hours</option>
             <option value="4">4 hours</option>
           </select>
-          <span class="hint">More data = slower scan but more accurate</span>
+          <span class="hint">Shorter = faster scan, longer = more data</span>
+        </div>
+        <div class="form-group">
+          <label>Auto-Scan Interval</label>
+          <select id="fScanInterval">
+            <option value="0">Off (manual only)</option>
+            <option value="2">Every 2 min</option>
+            <option value="5" selected>Every 5 min</option>
+            <option value="10">Every 10 min</option>
+            <option value="15">Every 15 min</option>
+            <option value="30">Every 30 min</option>
+          </select>
+          <span class="hint">Continuously re-scan and update bot symbols</span>
         </div>
         <div class="form-group">
           <label>App ID</label>
           <input type="number" id="fScanAppId" value="1089" step="1" min="1">
         </div>
       </div>
-      <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+
+      <!-- Scanner integration toggles -->
+      <div style="margin-top:14px;background:var(--bg3);border-radius:var(--radius-sm);padding:4px 14px;max-width:700px">
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Auto-Exclude DO_NOT_ENTER</div>
+            <div class="toggle-sub">Automatically uncheck symbols flagged as unsafe in Bot Control</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="tAutoExclude" checked><span class="toggle-slider"></span></label>
+        </div>
+        <div class="toggle-row">
+          <div>
+            <div class="toggle-label">Auto-Apply Best Strategy</div>
+            <div class="toggle-sub">Set algorithm + trade strategy to the top-ranked symbol's recommendation</div>
+          </div>
+          <label class="toggle"><input type="checkbox" id="tAutoStrategy"><span class="toggle-slider"></span></label>
+        </div>
+      </div>
+
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
         <button class="btn btn-primary" id="scanBtn" onclick="startScan()" style="min-width:180px">&#128269; Scan Market</button>
         <button class="btn btn-danger" id="scanStopBtn" onclick="stopScan()" style="display:none">&#9209; Stop</button>
+        <button class="btn btn-ghost" id="autoScanBtn" onclick="toggleAutoScan()" style="min-width:160px">&#128260; Start Auto-Scan</button>
         <div class="scan-progress" id="scanProgress" style="display:none">
           <div class="spinner" style="width:14px;height:14px;border-width:2px"></div>
           <span id="scanProgressText">Connecting...</span>
@@ -1070,9 +1134,12 @@ canvas{width:100%!important;max-height:280px}
       </div>
     </div>
     <div id="scanResultsWrap" style="display:none">
-      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
         <h3 style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text2);font-weight:600">Scan Results <span id="scanResultCount" style="color:var(--text3);font-weight:400"></span></h3>
-        <div style="font-size:.72rem;color:var(--text3);font-family:var(--mono)" id="scanTimestamp"></div>
+        <div style="display:flex;gap:8px;align-items:center">
+          <button class="btn btn-ghost" onclick="applyAllScanResults()" style="padding:5px 12px;font-size:.72rem">&#9989; Apply All to Bot</button>
+          <div style="font-size:.72rem;color:var(--text3);font-family:var(--mono)" id="scanTimestamp"></div>
+        </div>
       </div>
       <div class="scan-results" id="scanResults"></div>
     </div>
@@ -1380,6 +1447,7 @@ function buildParams() {
   const lossRaw   = document.getElementById('fLoss').value.trim();
   const profit    = profitRaw !== '' ? parseFloat(profitRaw) : null;
   const loss      = lossRaw  !== '' ? parseFloat(lossRaw)  : null;
+  const selectedSymbols = getSelectedSymbols();
   return { token, mode:currentMode, base_stake:stake, martingale:mart, max_stake:maxStake,
            threshold:thr, strategy, trade_strategy:tradeStrategy,
            ab_window:abWindow, disable_kelly:disKelly,
@@ -1388,7 +1456,8 @@ function buildParams() {
            hotness_cold: hotCold, hotness_probe: hotProbe,
            ml_idle_minutes: mlIdle, ml_floor: mlFloor,
            vol_skip_pct: volSkip,
-           profit_target:profit, loss_limit:loss };
+           profit_target:profit, loss_limit:loss,
+           symbols: selectedSymbols };
 }
 
 function updateCmd() {
@@ -1441,6 +1510,9 @@ function updateCmd() {
   }
   if (p.profit_target !== null) cmd += ` --profit-target ${p.profit_target}`;
   if (p.loss_limit    !== null) cmd += ` --loss-limit ${p.loss_limit}`;
+  if (p.symbols && p.symbols.length > 0 && p.symbols.length < ALL_SYMBOLS.length) {
+    cmd += ` --symbols ${p.symbols.join(' ')}`;
+  }
   document.getElementById('cmdPreview').innerHTML = cmd;
 }
 
@@ -1747,6 +1819,10 @@ function startScan() {
     else if (d.type === 'done') {
       finishScan();
       sortScanResults();
+      // Auto-apply when auto-scan is active
+      if (autoScanRunning || document.getElementById('tAutoExclude').checked) {
+        applyAllScanResults();
+      }
     }
   };
 
@@ -1836,18 +1912,120 @@ function renderScanCard(d, container) {
 }
 
 function applyScanRec(algo, tradeStrategy) {
-  // Set algorithm dropdown
   const algoEl = document.getElementById('fStrategy');
   if (algoEl) { algoEl.value = algo; onStrategyChange(); }
-  // Set trade strategy dropdown
   const tsEl = document.getElementById('fTradeStrategy');
   if (tsEl) tsEl.value = tradeStrategy;
   updateCmd();
-  // Switch to Bot Control tab
   switchTab('control');
 }
 
+function applyAllScanResults() {
+  if (!scanResults.length) return;
+  const autoExclude = document.getElementById('tAutoExclude').checked;
+  const autoStrategy = document.getElementById('tAutoStrategy').checked;
+  // Update symbol checkboxes based on scan
+  scanResults.forEach(d => {
+    const sig = d.recommendation?.entry_signal || 'WAIT';
+    const chk = document.getElementById('sym_' + d.symbol);
+    if (chk) {
+      if (autoExclude && sig === 'DO_NOT_ENTER') {
+        chk.checked = false;
+      } else {
+        chk.checked = true;
+      }
+    }
+  });
+  updateSymCount();
+  // Apply best strategy if enabled
+  if (autoStrategy && scanResults.length) {
+    const best = scanResults.find(d => (d.recommendation?.entry_signal||'') !== 'DO_NOT_ENTER');
+    if (best && best.recommendation) {
+      const algoEl = document.getElementById('fStrategy');
+      if (algoEl) { algoEl.value = best.recommendation.algorithm; onStrategyChange(); }
+      const tsEl = document.getElementById('fTradeStrategy');
+      if (tsEl) tsEl.value = best.recommendation.trade_strategy;
+    }
+  }
+  updateCmd();
+}
+
+// ─── SYMBOL CHECKLIST ────────────────────────────────────────────────────────
+const ALL_SYMBOLS = ['R_10','R_25','R_50','R_75','R_100','1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V'];
+
+function initSymChecklist() {
+  const wrap = document.getElementById('symChecklist');
+  wrap.innerHTML = ALL_SYMBOLS.map(s => `
+    <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-family:var(--mono);font-size:.75rem">
+      <input type="checkbox" id="sym_${s}" value="${s}" checked onchange="updateSymCount();updateCmd()" style="accent-color:var(--green)">
+      ${s}
+    </label>
+  `).join('');
+  updateSymCount();
+}
+
+function getSelectedSymbols() {
+  return ALL_SYMBOLS.filter(s => {
+    const chk = document.getElementById('sym_' + s);
+    return chk && chk.checked;
+  });
+}
+
+function updateSymCount() {
+  const sel = getSelectedSymbols();
+  const el = document.getElementById('symSelectedCount');
+  if (el) el.textContent = `(${sel.length}/${ALL_SYMBOLS.length})`;
+}
+
+function symSelectAll(checked) {
+  ALL_SYMBOLS.forEach(s => {
+    const chk = document.getElementById('sym_' + s);
+    if (chk) chk.checked = checked;
+  });
+  updateSymCount();
+  updateCmd();
+}
+
+// ─── AUTO-SCAN ───────────────────────────────────────────────────────────────
+let autoScanTimer = null;
+let autoScanRunning = false;
+
+function toggleAutoScan() {
+  if (autoScanRunning) {
+    stopAutoScan();
+  } else {
+    startAutoScan();
+  }
+}
+
+function startAutoScan() {
+  const intervalMin = parseInt(document.getElementById('fScanInterval').value) || 0;
+  if (intervalMin <= 0) {
+    alert('Set Auto-Scan Interval to a value > 0 first.');
+    return;
+  }
+  autoScanRunning = true;
+  const btn = document.getElementById('autoScanBtn');
+  btn.innerHTML = '&#9209; Stop Auto-Scan';
+  btn.className = 'btn btn-danger';
+  startScan(); // run first scan immediately
+  autoScanTimer = setInterval(() => {
+    if (!scanSource) { // only start new scan if previous finished
+      startScan();
+    }
+  }, intervalMin * 60 * 1000);
+}
+
+function stopAutoScan() {
+  autoScanRunning = false;
+  if (autoScanTimer) { clearInterval(autoScanTimer); autoScanTimer = null; }
+  const btn = document.getElementById('autoScanBtn');
+  btn.innerHTML = '&#128260; Start Auto-Scan';
+  btn.className = 'btn btn-ghost';
+}
+
 // ─── BOOT ────────────────────────────────────────────────────────────────────
+initSymChecklist();
 onStrategyChange();
 init();
 </script>
