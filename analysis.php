@@ -16,12 +16,20 @@ if (isset($_GET['api'])) {
     if ($_GET['api'] === 'sessions') {
         $files = glob($DATA_DIR . '/*.json');
         if (!$files) $files = [];
+        usort($files, fn($a, $b) => filemtime($b) <=> filemtime($a));
+        
+        $offset = isset($_GET['offset']) ? intval($_GET['offset']) : 0;
+        $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 10;
+        $slice = array_slice($files, $offset, $limit);
+
         $sessions = [];
-        foreach ($files as $f) {
+        foreach ($slice as $f) {
             $raw = @file_get_contents($f);
             if (!$raw) continue;
             $d = json_decode($raw, true);
             if (!$d) continue;
+            // Ignore files that are not sessions
+            if (!isset($d['session'])) continue;
             $sess = $d['session'] ?? [];
             $sum  = $d['summary'] ?? [];
             $sessions[] = [
@@ -1422,26 +1430,57 @@ async function pollBgStatus() {
 }
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
+let sessionsOffset = 0;
+let sessionsLimit = 10;
+let loadingSessions = false;
+let allSessionsLoaded = false;
+
 async function init() {
   updateCmd();
+  
+  const grid = document.getElementById('sessionGrid');
+  grid.addEventListener('scroll', function() {
+    if (this.scrollLeft + this.clientWidth >= this.scrollWidth - 100) {
+      if (!loadingSessions && !allSessionsLoaded) loadSessions(true);
+    }
+  });
+
   await loadSessions();
   pollBgStatus();
   setInterval(pollBgStatus, 8000); // background polling every 8s
 }
 
-async function loadSessions() {
+async function loadSessions(append = false) {
+  if (loadingSessions) return;
+  loadingSessions = true;
   try {
-    sessions = await apiFetch('?api=sessions');
-    renderSessionGrid();
+    if (!append) {
+      sessionsOffset = 0;
+      allSessionsLoaded = false;
+      document.getElementById('sessionGrid').innerHTML = '<div style="padding:20px;color:var(--text3);display:flex;align-items:center"><div class="spinner" style="margin-right:8px;border-width:2px;width:14px;height:14px"></div> Loading sessions...</div>';
+    }
+    
+    const newSessions = await apiFetch(`?api=sessions&offset=${sessionsOffset}&limit=${sessionsLimit}`);
+    
+    if (newSessions.length < sessionsLimit) allSessionsLoaded = true;
+    
+    if (!append) sessions = newSessions;
+    else sessions = sessions.concat(newSessions);
+    
+    sessionsOffset += newSessions.length;
+    
+    renderSessionGrid(append, newSessions);
     document.getElementById('sessCount').textContent = sessions.length;
-    if (activeFile && sessions.find(s => s.file === activeFile)) {
+    
+    if (!append && activeFile && sessions.find(s => s.file === activeFile)) {
       await loadSession(activeFile, false);
     }
   } catch(e) { console.error('Sessions:', e); }
+  loadingSessions = false;
 }
 
 function refreshAll() {
-  loadSessions();
+  loadSessions(false);
   pollBgStatus();
 }
 
@@ -1451,13 +1490,14 @@ document.getElementById('autoRefresh').addEventListener('change', function() {
 });
 
 // ─── SESSION GRID ─────────────────────────────────────────────────────────────
-function renderSessionGrid() {
+function renderSessionGrid(append = false, newSessions = null) {
   const grid = document.getElementById('sessionGrid');
   if (!sessions.length) {
     grid.innerHTML = '<div style="color:var(--text3);padding:20px;font-size:.85rem">No sessions found in data/ folder.</div>';
     return;
   }
-  grid.innerHTML = sessions.map(s => {
+  const toRender = append ? (newSessions || []) : sessions;
+  const html = toRender.map(s => {
     const pnl = s.net_pnl ?? 0;
     const pnlClass = pnl >= 0 ? 'c-green' : 'c-red';
     const wr = ((s.win_rate ?? 0) * 100).toFixed(1);
@@ -1477,21 +1517,43 @@ function renderSessionGrid() {
       </div>
     </div>`;
   }).join('');
+  
+  if (append) {
+    grid.insertAdjacentHTML('beforeend', html);
+  } else {
+    grid.innerHTML = html;
+  }
 }
 
 // ─── LOAD SESSION ─────────────────────────────────────────────────────────────
 async function loadSession(file, scroll=true) {
   activeFile = file;
+  
+  // Highlight card immediately
+  document.querySelectorAll('.session-card').forEach(c =>
+    c.classList.toggle('active-card', c.dataset.file === file));
+    
+  document.getElementById('emptyState').style.display = 'none';
+  const dash = document.getElementById('dashboard');
+  dash.style.display = 'block';
+  dash.style.opacity = '0.5';
+  dash.style.pointerEvents = 'none';
+  
+  // Optional: Add a simple loading indicator at the top
+  const headerText = document.getElementById('topbarTitle');
+  const oldText = headerText.textContent;
+  headerText.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px;margin-right:8px"></div>Loading Session Data...';
+
   try {
     // Fresh read — never use cached data
     activeData = await apiFetch('?api=session&file=' + encodeURIComponent(file) + '&_t=' + Date.now());
     renderDashboard();
-    document.getElementById('emptyState').style.display = 'none';
-    document.getElementById('dashboard').style.display = 'block';
-    document.querySelectorAll('.session-card').forEach(c =>
-      c.classList.toggle('active-card', c.dataset.file === file));
     if (scroll) document.getElementById('dashboard').scrollIntoView({ behavior:'smooth', block:'start' });
   } catch(e) { console.error('Session load:', e); }
+  
+  dash.style.opacity = '1';
+  dash.style.pointerEvents = 'auto';
+  headerText.textContent = oldText;
 }
 
 // ─── RENDER DASHBOARD ─────────────────────────────────────────────────────────
@@ -1894,11 +1956,12 @@ function updateCmd() {
 async function startBot() {
   const btn = document.getElementById('startBtn');
   btn.disabled = true;
-  btn.innerHTML = '<div class="spinner"></div> Starting...';
+  btn.innerHTML = '<div class="spinner" style="margin-right:6px"></div> Starting...';
   try {
     const res = await apiPost('?api=bot_start', buildParams());
     if (res.success) {
-      setTimeout(() => { loadSessions(); pollBgStatus(); }, 2500);
+      updateBotUI(true, 'Bot starting...\n');
+      setTimeout(() => { loadSessions(false); pollBgStatus(); }, 2500);
     } else {
       alert('Failed to start bot.\nReturn: ' + res.ret + '\n' + (res.out||''));
     }
@@ -1913,8 +1976,11 @@ async function stopBot() {
   btn.disabled = true;
   btn.innerHTML = '<div class="spinner"></div>';
   try {
-    await apiPost('?api=bot_stop', {});
-    setTimeout(() => { loadSessions(); pollBgStatus(); btn.innerHTML='⏹ Stop'; }, 2500);
+    const res = await apiPost('?api=bot_stop', {});
+    if (res.success) {
+      updateBotUI(false, '');
+    }
+    setTimeout(() => { loadSessions(false); pollBgStatus(); btn.innerHTML='⏹ Stop'; }, 2500);
   } catch(e) { btn.disabled=false; btn.innerHTML='⏹ Stop'; }
 }
 
@@ -2184,6 +2250,11 @@ async function refreshDaemonStatus() {
 
 async function refreshFromDaemon() {
   try {
+    const wrap=document.getElementById('scanResultsWrap');
+    const grid=document.getElementById('scanResults');
+    wrap.style.display='';
+    grid.innerHTML='<div style="padding:20px;color:var(--text3);display:flex;align-items:center"><div class="spinner" style="margin-right:8px;border-width:2px;width:14px;height:14px"></div>Loading real-time scan results from daemon...</div>';
+    
     const data=await apiFetch('?api=daemon_scan');
     if (data.error) { alert(data.error); return; }
     const results=data.results||[];
