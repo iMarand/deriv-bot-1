@@ -428,6 +428,60 @@ if (isset($_GET['api'])) {
         exit;
     }
 
+    if ($_GET['api'] === 'manager_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $MGR_TMUX = 'bbot-manager';
+        $chk=[]; $chkCode=-1;
+        exec("tmux has-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1", $chk, $chkCode);
+        if ($chkCode === 0) {
+            exec("tmux send-keys -t " . escapeshellarg($MGR_TMUX) . " C-c 2>&1");
+            usleep(500000);
+            exec("tmux kill-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1");
+        }
+        
+        // Write manager config
+        file_put_contents($BOT_DIR . '/data/manager_config.json', json_encode($body));
+        
+        $cmd = sprintf("cd %s && python3 auto_manager.py", escapeshellarg($BOT_DIR));
+        $tmuxCmd = "tmux new-session -d -s " . escapeshellarg($MGR_TMUX) . " " . escapeshellarg($cmd) . " 2>&1";
+        exec($tmuxCmd, $out, $ret);
+        sleep(1);
+        echo json_encode(['success'=>true]);
+        exit;
+    }
+
+    if ($_GET['api'] === 'manager_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $MGR_TMUX = 'bbot-manager';
+        exec("tmux send-keys -t " . escapeshellarg($MGR_TMUX) . " C-c 2>&1");
+        usleep(500000);
+        exec("tmux kill-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1");
+        echo json_encode(['success'=>true]);
+        exit;
+    }
+
+    if ($_GET['api'] === 'manager_status') {
+        $MGR_TMUX = 'bbot-manager';
+        $chk=[]; $chkCode=-1;
+        exec("tmux has-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1", $chk, $chkCode);
+        $running = ($chkCode===0);
+        
+        $state = [];
+        $stateFile = $BOT_DIR . '/data/manager_state.json';
+        if (file_exists($stateFile)) {
+            $state = json_decode(file_get_contents($stateFile), true) ?? [];
+        }
+        
+        $logs = '';
+        if ($running) {
+            $logOut = [];
+            exec("tmux capture-pane -t " . escapeshellarg($MGR_TMUX) . " -p -S -50 2>&1", $logOut);
+            $logs = implode("\n", $logOut);
+        }
+        
+        echo json_encode(['running'=>$running, 'state'=>$state, 'logs'=>$logs]);
+        exit;
+    }
+
     // Background processes status
     if ($_GET['api'] === 'bg_status') {
         $DAEMON_TMUX = 'market_daemon';
@@ -436,9 +490,13 @@ if (isset($_GET['api'])) {
         $daemonChk=[]; $daemonCode=-1;
         exec("tmux has-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1", $daemonChk, $daemonCode);
         $scanFile = $BOT_DIR . '/data/market_scan.json';
+        $MGR_TMUX = 'bbot-manager';
+        $mgrChk=[]; $mgrCode=-1;
+        exec("tmux has-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1", $mgrChk, $mgrCode);
         echo json_encode([
             'bot_running'    => $botCode === 0,
             'daemon_running' => $daemonCode === 0,
+            'manager_running'=> $mgrCode === 0,
             'daemon_file_age'=> file_exists($scanFile) ? time() - filemtime($scanFile) : null,
         ]);
         exit;
@@ -1069,8 +1127,8 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Max Stake ($)</label>
-                  <input type="number" id="fMaxStake" value="50" step="1" min="1" oninput="updateCmd()">
-                  <span class="hint" id="hMaxStake">Covers up to 7 losses</span>
+                  <input type="number" id="fMaxStake" value="5000" step="1" min="1" oninput="updateCmd()">
+                  <span class="hint" id="hMaxStake">Covers up to 13 losses</span>
                 </div>
                 <div class="form-group">
                   <label>Score Threshold</label>
@@ -1130,11 +1188,11 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Take Profit ($) <span style="color:var(--text4);font-weight:400">opt</span></label>
-                  <input type="number" id="fProfit" step="1" min="0" placeholder="e.g. 50" oninput="updateCmd()">
+                  <input type="number" id="fProfit" value="200" step="1" min="0" placeholder="e.g. 50" oninput="updateCmd()">
                 </div>
                 <div class="form-group">
                   <label>Loss Limit ($) <span style="color:var(--text4);font-weight:400">opt</span></label>
-                  <input type="number" id="fLoss" step="1" placeholder="e.g. -30" oninput="updateCmd()">
+                  <input type="number" id="fLoss" value="-1900" step="1" placeholder="e.g. -30" oninput="updateCmd()">
                 </div>
               </div>
 
@@ -1435,8 +1493,8 @@ canvas{width:100%!important}
           <button class="btn btn-primary" id="scanBtn" onclick="startScan()">🔍 Manual Scan</button>
           <button class="btn btn-danger" id="scanStopBtn" onclick="stopScan()" style="display:none">⏹ Stop</button>
           <button class="btn btn-ghost" onclick="refreshFromDaemon()">🔄 Refresh from Daemon</button>
-          <button class="btn btn-ghost" id="autoScanBtn" onclick="toggleAutoScan()">🔁 Start Auto-Refresh</button>
-          <button class="btn btn-ghost btn-sm" onclick="applyAllScanResults()">✅ Apply All to Bot</button>
+          <button class="btn btn-ghost" id="managerBtn" onclick="toggleManager()">🔁 Start Auto-Manager</button>
+          <button class="btn btn-ghost btn-sm" onclick="applyAllScanResults()" style="display:none">✅ Apply All to Bot</button>
           <div class="prog-wrap" id="scanProgress" style="display:none">
             <div class="spinner" style="width:14px;height:14px;border-width:2px"></div>
             <span id="scanProgressText">Connecting...</span>
@@ -1453,6 +1511,18 @@ canvas{width:100%!important}
         </div>
         <div class="scan-results" id="scanResults"></div>
       </div>
+      
+      <!-- Manager Logs -->
+      <div class="card" style="margin-top:20px;">
+        <div class="card-header" style="display:flex;justify-content:space-between;align-items:center;">
+          <h3 style="display:flex;align-items:center;gap:6px">Auto-Manager <div class="status-dot off" id="managerDot"></div></h3>
+          <div style="font-size:0.7rem;color:var(--text3);" id="managerStateMsg">Waiting...</div>
+        </div>
+        <div class="card-body" style="padding:14px">
+          <div class="log-output empty" id="managerLogOutput" style="max-height:200px">Manager is not running.</div>
+        </div>
+      </div>
+
     </div>
 
   </div><!-- /content -->
@@ -2644,22 +2714,85 @@ function matchFilter(candidates,allowedAlgos,allowedTS,trad) {
   return{algorithm:allowedAlgos[0]||'adaptive',trade_strategy:allowedTS[0]||'even_odd',entry_signal:'WAIT',tradability:trad};
 }
 
-// ─── AUTO-SCAN ───────────────────────────────────────────────────────────────
-let autoScanTimer=null, autoScanRunning=false;
-function toggleAutoScan() {
-  if (autoScanRunning) {
-    autoScanRunning=false; clearInterval(autoScanTimer); autoScanTimer=null;
-    document.getElementById('autoScanBtn').innerHTML='🔁 Start Auto-Refresh';
-    document.getElementById('autoScanBtn').className='btn btn-ghost';
+// ─── AUTO-MANAGER ────────────────────────────────────────────────────────────
+let managerRunning = false;
+let managerPollTimer = null;
+
+async function toggleManager() {
+  if (managerRunning) {
+    try { await apiFetch('?api=manager_stop', {method:'POST'}); } catch(e){}
+    managerRunning = false;
+    document.getElementById('managerBtn').innerHTML = '🔁 Start Auto-Manager';
+    document.getElementById('managerBtn').className = 'btn btn-ghost';
+    pollManagerLogs();
   } else {
-    const intervalMin=parseFloat(document.getElementById('fScanInterval').value)||0;
-    if (intervalMin<=0) { alert('Set Auto-Refresh Interval first.'); return; }
-    autoScanRunning=true;
-    document.getElementById('autoScanBtn').innerHTML='⏹ Stop Auto-Refresh';
-    document.getElementById('autoScanBtn').className='btn btn-danger';
-    refreshFromDaemon();
-    autoScanTimer=setInterval(refreshFromDaemon, intervalMin*60*1000);
+    // Build config to pass to manager
+    const allowedAlgos = [...document.querySelectorAll('.algoFilterChk:checked')].map(c=>c.value);
+    const allowedTS = [...document.querySelectorAll('.tsFilterChk:checked')].map(c=>c.value);
+    
+    if (allowedAlgos.length === 0 || allowedTS.length === 0) {
+      alert("Please select at least one Algorithm and one Trade Strategy.");
+      return;
+    }
+    
+    // Build base_cmd
+    updateCmd(); // Ensures cmd string is up to date
+    let baseCmd = document.getElementById('cmdCode').textContent;
+    baseCmd = baseCmd.replace(/python3 bot\.py/, 'python3 bot.py');
+    
+    try {
+      await apiPost('?api=manager_start', {
+        algorithms: allowedAlgos,
+        trade_strategies: allowedTS,
+        base_cmd: baseCmd
+      });
+      managerRunning = true;
+      document.getElementById('managerBtn').innerHTML = '⏹ Stop Auto-Manager';
+      document.getElementById('managerBtn').className = 'btn btn-danger';
+      pollManagerLogs();
+      if (!managerPollTimer) managerPollTimer = setInterval(pollManagerLogs, 3000);
+    } catch(e) {
+      alert("Failed to start manager.");
+    }
   }
+}
+
+async function pollManagerLogs() {
+  try {
+    const d = await apiFetch('?api=manager_status');
+    managerRunning = d.running;
+    
+    const dot = document.getElementById('managerDot');
+    const msg = document.getElementById('managerStateMsg');
+    const logEl = document.getElementById('managerLogOutput');
+    const btn = document.getElementById('managerBtn');
+    
+    if (d.running) {
+      dot.className = 'status-dot on';
+      msg.textContent = d.state?.status_msg || 'Running...';
+      msg.style.color = 'var(--green-light)';
+      btn.innerHTML = '⏹ Stop Auto-Manager';
+      btn.className = 'btn btn-danger';
+      
+      if (d.logs && d.logs.trim()) {
+        logEl.className = 'log-output';
+        logEl.textContent = d.logs;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      if (!managerPollTimer) managerPollTimer = setInterval(pollManagerLogs, 3000);
+    } else {
+      dot.className = 'status-dot off';
+      msg.textContent = 'Stopped';
+      msg.style.color = 'var(--text3)';
+      btn.innerHTML = '🔁 Start Auto-Manager';
+      btn.className = 'btn btn-ghost';
+      
+      logEl.className = 'log-output empty';
+      logEl.textContent = 'Manager is not running.';
+      
+      if (managerPollTimer) { clearInterval(managerPollTimer); managerPollTimer = null; }
+    }
+  } catch(e) {}
 }
 
 // ─── UTILS ───────────────────────────────────────────────────────────────────
@@ -2682,6 +2815,7 @@ initSymChecklist();
 onStrategyChange();
 init();
 refreshDaemonStatus();
+pollManagerLogs();
 </script>
 </body>
 </html>
