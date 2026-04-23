@@ -316,6 +316,41 @@ if (isset($_GET['api'])) {
         exit;
     }
 
+    // ── market scanner SSE (GET, streams events) ────────────────────────────
+    if ($_GET['api'] === 'scan_market') {
+        header('Content-Type: text/event-stream');
+        header('Cache-Control: no-cache');
+        header('X-Accel-Buffering: no');
+        if (ob_get_level()) ob_end_clean();
+
+        $hours  = floatval($_GET['hours']  ?? 1);
+        $appId  = intval($_GET['app_id']   ?? 1089);
+        if ($hours < 0.25 || $hours > 24) $hours = 1;
+
+        $cmd = sprintf(
+            "cd %s && python3 market_scanner.py --app-id %d --hours %.2f 2>/dev/null",
+            escapeshellarg($BOT_DIR), $appId, $hours
+        );
+
+        $proc = popen($cmd, 'r');
+        if (!$proc) {
+            echo "data: " . json_encode(['type'=>'error','message'=>'Failed to start scanner']) . "\n\n";
+            flush();
+            exit;
+        }
+
+        while (!feof($proc)) {
+            $line = fgets($proc);
+            if ($line === false) break;
+            $line = trim($line);
+            if ($line === '') continue;
+            echo "data: $line\n\n";
+            flush();
+        }
+        pclose($proc);
+        exit;
+    }
+
     http_response_code(400);
     echo json_encode(['error'=>'Unknown endpoint']);
     exit;
@@ -561,6 +596,40 @@ canvas{width:100%!important;max-height:280px}
 .ml-thr-table th{text-align:right;color:var(--text3);font-size:.65rem;text-transform:uppercase;letter-spacing:.06em;font-weight:600}
 .ml-thr-table th:first-child,.ml-thr-table td:first-child{text-align:left}
 
+/* ── SCANNER ── */
+.scan-header{display:flex;align-items:center;gap:14px;flex-wrap:wrap;margin-bottom:18px}
+.scan-progress{display:flex;align-items:center;gap:10px;font-family:var(--mono);font-size:.8rem;color:var(--text2)}
+.scan-progress-bar{width:200px;height:6px;background:var(--bg3);border-radius:3px;overflow:hidden}
+.scan-progress-fill{height:100%;background:linear-gradient(90deg,var(--green),var(--cyan));border-radius:3px;transition:width .3s}
+.scan-results{display:grid;grid-template-columns:repeat(auto-fill,minmax(340px,1fr));gap:14px;margin-top:16px}
+.scan-card{background:var(--bg2);border:1px solid var(--border);border-radius:var(--radius);padding:18px;transition:all .2s;position:relative;overflow:hidden}
+.scan-card:hover{border-color:var(--border2);transform:translateY(-2px);box-shadow:0 8px 30px #00000040}
+.scan-card.strong{border-color:var(--green);box-shadow:0 0 0 1px var(--green),0 4px 20px #00e67615}
+.scan-card.good{border-color:var(--cyan);box-shadow:0 0 0 1px var(--cyan)44}
+.scan-card.wait{border-color:var(--amber)}
+.scan-card.danger{border-color:var(--red);opacity:.7}
+.scan-card-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:12px}
+.scan-card-sym{font-family:var(--mono);font-size:1.05rem;font-weight:700}
+.scan-badge{font-size:.65rem;font-weight:700;padding:3px 9px;border-radius:4px;text-transform:uppercase;letter-spacing:.05em}
+.scan-badge.strong-entry{background:#00e67625;color:var(--green)}
+.scan-badge.good-entry{background:#18ffff25;color:var(--cyan)}
+.scan-badge.wait-badge{background:#ffab4025;color:var(--amber)}
+.scan-badge.no-entry{background:#ff525225;color:var(--red)}
+.scan-metrics{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin-bottom:12px}
+.scan-metric{display:flex;flex-direction:column;gap:2px}
+.scan-metric .sm-label{font-size:.6rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)}
+.scan-metric .sm-value{font-family:var(--mono);font-size:.82rem;font-weight:600}
+.scan-patterns{display:flex;gap:8px;margin-bottom:12px;flex-wrap:wrap}
+.scan-pat{font-family:var(--mono);font-size:.7rem;padding:3px 8px;border-radius:4px;background:var(--bg3);border:1px solid var(--border)}
+.scan-pat.active{border-color:var(--green);color:var(--green);background:#00e67610}
+.scan-rec{background:var(--bg3);border-radius:var(--radius-sm);padding:10px 12px;display:flex;justify-content:space-between;align-items:center}
+.scan-rec-text{font-size:.78rem;color:var(--text2)}
+.scan-rec-text strong{color:var(--text);font-weight:600}
+.scan-use-btn{font-family:var(--font);font-size:.72rem;font-weight:700;padding:6px 14px;border-radius:4px;border:1px solid var(--green);background:var(--green2);color:var(--green);cursor:pointer;transition:all .15s}
+.scan-use-btn:hover{background:var(--green);color:#0a0b0f;transform:translateY(-1px)}
+.tradability-bar{width:100%;height:5px;background:var(--bg3);border-radius:3px;overflow:hidden;margin-top:8px}
+.tradability-fill{height:100%;border-radius:3px;transition:width .4s}
+
 /* ── MISC ── */
 ::-webkit-scrollbar{width:6px;height:6px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:var(--border);border-radius:3px}::-webkit-scrollbar-thumb:hover{background:var(--border2)}
 .spinner{width:18px;height:18px;border:2px solid var(--border);border-top-color:var(--green);border-radius:50%;animation:spin .6s linear infinite;display:inline-block}
@@ -609,6 +678,9 @@ canvas{width:100%!important;max-height:280px}
     </button>
     <button class="tab-btn" data-tab="training" onclick="switchTab('training')">
       &#129504; ML Training <span class="tab-dot off" id="mlDot"></span>
+    </button>
+    <button class="tab-btn" data-tab="scanner" onclick="switchTab('scanner')">
+      &#128269; Market Scanner
     </button>
   </div>
 
@@ -963,6 +1035,48 @@ canvas{width:100%!important;max-height:280px}
 
     </div><!-- /control-wrap -->
   </div><!-- /tab-training -->
+
+  <!-- ════════════════════════ TAB: SCANNER ════════════════════════ -->
+  <div class="tab-content" id="tab-scanner">
+    <div class="ctrl-box" style="margin-bottom:18px">
+      <h3>&#128269; Market Volatility Scanner</h3>
+      <div style="font-size:.8rem;color:var(--text2);margin-bottom:16px;line-height:1.6">
+        Scans all synthetic indices in real-time: analyses volatility regime, digit bias, and pattern signals (Pulse, Roll Cake, Zigzag) to recommend the best strategy and entry timing.
+      </div>
+      <div class="form-grid" style="max-width:500px">
+        <div class="form-group">
+          <label>Lookback Period</label>
+          <select id="fScanHours">
+            <option value="0.5">30 minutes</option>
+            <option value="1" selected>1 hour</option>
+            <option value="2">2 hours</option>
+            <option value="4">4 hours</option>
+          </select>
+          <span class="hint">More data = slower scan but more accurate</span>
+        </div>
+        <div class="form-group">
+          <label>App ID</label>
+          <input type="number" id="fScanAppId" value="1089" step="1" min="1">
+        </div>
+      </div>
+      <div style="margin-top:14px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-primary" id="scanBtn" onclick="startScan()" style="min-width:180px">&#128269; Scan Market</button>
+        <button class="btn btn-danger" id="scanStopBtn" onclick="stopScan()" style="display:none">&#9209; Stop</button>
+        <div class="scan-progress" id="scanProgress" style="display:none">
+          <div class="spinner" style="width:14px;height:14px;border-width:2px"></div>
+          <span id="scanProgressText">Connecting...</span>
+          <div class="scan-progress-bar"><div class="scan-progress-fill" id="scanProgressFill" style="width:0%"></div></div>
+        </div>
+      </div>
+    </div>
+    <div id="scanResultsWrap" style="display:none">
+      <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px">
+        <h3 style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text2);font-weight:600">Scan Results <span id="scanResultCount" style="color:var(--text3);font-weight:400"></span></h3>
+        <div style="font-size:.72rem;color:var(--text3);font-family:var(--mono)" id="scanTimestamp"></div>
+      </div>
+      <div class="scan-results" id="scanResults"></div>
+    </div>
+  </div><!-- /tab-scanner -->
 
 </div><!-- /container -->
 
@@ -1574,6 +1688,163 @@ function computeDuration(start,end) {
   if (diff<60) return diff+'s';
   if (diff<3600) return Math.floor(diff/60)+'m '+(diff%60)+'s';
   return Math.floor(diff/3600)+'h '+Math.floor((diff%3600)/60)+'m';
+}
+
+// ─── MARKET SCANNER ──────────────────────────────────────────────────────────
+let scanSource = null;
+let scanResults = [];
+
+function startScan() {
+  const hours = document.getElementById('fScanHours').value;
+  const appId = document.getElementById('fScanAppId').value;
+  const btn = document.getElementById('scanBtn');
+  const stopBtn = document.getElementById('scanStopBtn');
+  const prog = document.getElementById('scanProgress');
+  const fill = document.getElementById('scanProgressFill');
+  const txt = document.getElementById('scanProgressText');
+  const wrap = document.getElementById('scanResultsWrap');
+  const grid = document.getElementById('scanResults');
+
+  if (scanSource) { scanSource.close(); scanSource = null; }
+  scanResults = [];
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> Scanning...';
+  stopBtn.style.display = '';
+  prog.style.display = 'flex';
+  fill.style.width = '0%';
+  txt.textContent = 'Connecting...';
+  wrap.style.display = '';
+  grid.innerHTML = '';
+
+  const url = `?api=scan_market&hours=${hours}&app_id=${appId}`;
+  scanSource = new EventSource(url);
+
+  scanSource.onmessage = function(ev) {
+    let d;
+    try { d = JSON.parse(ev.data); } catch(e) { return; }
+
+    if (d.type === 'start') {
+      txt.textContent = `Scanning ${d.symbols.length} symbols...`;
+    }
+    else if (d.type === 'progress') {
+      const pct = Math.round((d.step / d.total) * 100);
+      fill.style.width = pct + '%';
+      txt.textContent = d.message;
+    }
+    else if (d.type === 'result') {
+      scanResults.push(d);
+      renderScanCard(d, grid);
+      document.getElementById('scanResultCount').textContent = `(${scanResults.length})`;
+    }
+    else if (d.type === 'error') {
+      if (d.symbol !== '__connection__') {
+        const errDiv = document.createElement('div');
+        errDiv.className = 'scan-card danger';
+        errDiv.innerHTML = `<div class="scan-card-head"><span class="scan-card-sym">${d.symbol||'Error'}</span><span class="scan-badge no-entry">ERROR</span></div><div style="font-size:.78rem;color:var(--red)">${d.message}</div>`;
+        grid.appendChild(errDiv);
+      }
+    }
+    else if (d.type === 'done') {
+      finishScan();
+      sortScanResults();
+    }
+  };
+
+  scanSource.onerror = function() {
+    finishScan();
+    if (scanResults.length) sortScanResults();
+  };
+}
+
+function stopScan() {
+  if (scanSource) { scanSource.close(); scanSource = null; }
+  finishScan();
+}
+
+function finishScan() {
+  const btn = document.getElementById('scanBtn');
+  btn.disabled = false;
+  btn.innerHTML = '&#128269; Scan Market';
+  document.getElementById('scanStopBtn').style.display = 'none';
+  document.getElementById('scanProgress').style.display = 'none';
+  document.getElementById('scanTimestamp').textContent = 'Scanned at ' + new Date().toLocaleTimeString();
+  if (scanSource) { scanSource.close(); scanSource = null; }
+}
+
+function sortScanResults() {
+  scanResults.sort((a,b) => (b.recommendation?.tradability||0) - (a.recommendation?.tradability||0));
+  const grid = document.getElementById('scanResults');
+  grid.innerHTML = '';
+  scanResults.forEach(d => renderScanCard(d, grid));
+}
+
+function renderScanCard(d, container) {
+  if (d.status === 'NO_DATA') return;
+  const r = d.recommendation || {};
+  const v = d.volatility || {};
+  const dg = d.digits || {};
+  const p = d.patterns || {};
+  const sig = r.entry_signal || 'WAIT';
+  const trad = r.tradability || 0;
+
+  let cardClass = 'scan-card';
+  let badgeClass = 'scan-badge wait-badge';
+  let badgeText = sig.replace(/_/g,' ');
+  if (sig === 'STRONG_ENTRY') { cardClass += ' strong'; badgeClass = 'scan-badge strong-entry'; }
+  else if (sig === 'GOOD_ENTRY') { cardClass += ' good'; badgeClass = 'scan-badge good-entry'; }
+  else if (sig === 'DO_NOT_ENTER') { cardClass += ' danger'; badgeClass = 'scan-badge no-entry'; }
+
+  const tradColor = trad >= 70 ? 'var(--green)' : trad >= 45 ? 'var(--amber)' : 'var(--red)';
+  const regimeColors = { MEAN_REVERTING:'var(--green)', TRENDING:'var(--cyan)', CHOPPY:'var(--red)', UNKNOWN:'var(--text3)' };
+  const volColors = { LOW:'var(--green)', MODERATE:'var(--cyan)', HIGH:'var(--amber)', EXTREME:'var(--red)', UNKNOWN:'var(--text3)' };
+
+  const algoNames = { alphabloom:'AlphaBloom', pulse:'Pulse', ensemble:'Ensemble', novaburst:'NovaBurst', adaptive:'Adaptive' };
+  const tsNames = {
+    even_odd:'Even/Odd', rise_fall_roll:'Rise/Fall Roll', rise_fall_zigzag:'Rise/Fall Zigzag',
+    higher_lower_roll:'Higher/Lower Roll', higher_lower_zigzag:'Higher/Lower Zigzag',
+    over_under_roll:'Over/Under Roll', touch_notouch_zigzag:'Touch/NoTouch Zigzag'
+  };
+
+  const card = document.createElement('div');
+  card.className = cardClass;
+  card.innerHTML = `
+    <div class="scan-card-head">
+      <span class="scan-card-sym">${d.symbol}</span>
+      <span class="${badgeClass}">${badgeText}</span>
+    </div>
+    <div class="scan-metrics">
+      <div class="scan-metric"><span class="sm-label">Regime</span><span class="sm-value" style="color:${regimeColors[d.regime]||'var(--text)'}">${d.regime||'—'}</span></div>
+      <div class="scan-metric"><span class="sm-label">Volatility</span><span class="sm-value" style="color:${volColors[v.level]||'var(--text)'}">${v.level||'—'}</span></div>
+      <div class="scan-metric"><span class="sm-label">ATR %ile</span><span class="sm-value">${v.atr_percentile!=null?v.atr_percentile.toFixed(0)+'%':'—'}</span></div>
+      <div class="scan-metric"><span class="sm-label">P(even)</span><span class="sm-value">${dg.p_even!=null?(dg.p_even*100).toFixed(1)+'%':'—'}</span></div>
+      <div class="scan-metric"><span class="sm-label">Bias</span><span class="sm-value" style="color:${dg.is_biased?'var(--green)':'var(--text3)'}">${dg.is_biased?'YES':'no'} ${dg.bias_magnitude!=null?'('+dg.bias_magnitude.toFixed(3)+')':''}</span></div>
+      <div class="scan-metric"><span class="sm-label">Momentum</span><span class="sm-value">${v.momentum!=null?(v.momentum>=0?'+':'')+v.momentum.toFixed(4):'—'}</span></div>
+    </div>
+    <div class="scan-patterns">
+      <span class="scan-pat ${p.pulse?.score>=0.4?'active':''}">Pulse ${p.pulse?.score!=null?p.pulse.score.toFixed(2):'—'}${p.pulse?.direction?' '+p.pulse.direction:''}</span>
+      <span class="scan-pat ${p.rollcake?.score>=0.3?'active':''}">Roll ${p.rollcake?.score!=null?p.rollcake.score.toFixed(2):'—'}${p.rollcake?.direction?' '+p.rollcake.direction:''}</span>
+      <span class="scan-pat ${p.zigzag?.score>=0.3?'active':''}">Zigzag ${p.zigzag?.score!=null?p.zigzag.score.toFixed(2):'—'}${p.zigzag?.direction?' '+p.zigzag.direction:''}</span>
+    </div>
+    <div class="scan-rec">
+      <div class="scan-rec-text"><strong>${algoNames[r.algorithm]||r.algorithm||'—'}</strong> + ${tsNames[r.trade_strategy]||r.trade_strategy||'—'}</div>
+      ${sig!=='DO_NOT_ENTER'?`<button class="scan-use-btn" onclick="applyScanRec('${r.algorithm}','${r.trade_strategy}')">Use</button>`:''}
+    </div>
+    <div class="tradability-bar"><div class="tradability-fill" style="width:${trad}%;background:${tradColor}"></div></div>
+    <div style="text-align:right;font-family:var(--mono);font-size:.68rem;color:var(--text3);margin-top:4px">Tradability: ${trad}/100</div>
+  `;
+  container.appendChild(card);
+}
+
+function applyScanRec(algo, tradeStrategy) {
+  // Set algorithm dropdown
+  const algoEl = document.getElementById('fStrategy');
+  if (algoEl) { algoEl.value = algo; onStrategyChange(); }
+  // Set trade strategy dropdown
+  const tsEl = document.getElementById('fTradeStrategy');
+  if (tsEl) tsEl.value = tradeStrategy;
+  updateCmd();
+  // Switch to Bot Control tab
+  switchTab('control');
 }
 
 // ─── BOOT ────────────────────────────────────────────────────────────────────
