@@ -822,11 +822,21 @@ canvas{width:100%!important}
 .filter-check-label input{accent-color:var(--blue-light)}
 
 /* Responsive */
-@media(max-width:768px){
-  .sidebar{display:none}
+.mobile-nav-btn { display: none; background: transparent; border: none; color: var(--text); font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
+.sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; }
+
+@media(max-width:850px){
+  .sidebar{position: fixed; left: -250px; width: 250px; z-index: 100; transition: left 0.3s cubic-bezier(0.4, 0, 0.2, 1); box-shadow: var(--shadow-lg);}
+  .sidebar.open{left: 0;}
+  .sidebar-overlay.active{display: block;}
+  .mobile-nav-btn { display: block; margin-right: 10px; }
+  
   .stat-row{grid-template-columns:1fr 1fr}
   .content{padding:16px}
   .chart-row{grid-template-columns:1fr}
+  
+  .topbar { padding: 12px 16px; flex-wrap: wrap; gap: 10px; }
+  .topbar-right { flex-wrap: wrap; width: 100%; justify-content: flex-start; gap: 10px; }
 }
 </style>
 </head>
@@ -871,9 +881,13 @@ canvas{width:100%!important}
 
 <!-- MAIN -->
 <div class="main">
+  <div class="sidebar-overlay" id="sidebarOverlay" onclick="toggleSidebar()"></div>
   <!-- TOP BAR -->
   <div class="topbar">
-    <div class="topbar-title" id="topbarTitle">Session Analytics</div>
+    <div style="display:flex;align-items:center;">
+      <button class="mobile-nav-btn" onclick="toggleSidebar()">☰</button>
+      <div class="topbar-title" id="topbarTitle">Session Analytics</div>
+    </div>
     <div class="topbar-right">
       <div class="topbar-badge">
         <span class="dot off" id="topBotDot"></span> Bot
@@ -1454,7 +1468,16 @@ let logSSE = null; // SSE connection for bot logs
 
 // ─── TABS ─────────────────────────────────────────────────────────────────────
 const TAB_TITLES = { analytics: 'Session Analytics', summary: 'Performance Summary', control: 'Bot Control', training: 'ML Training', scanner: 'Market Scanner' };
+
+function toggleSidebar() {
+  document.querySelector('.sidebar').classList.toggle('open');
+  document.getElementById('sidebarOverlay').classList.toggle('active');
+}
+
 function switchTab(tab, el) {
+  if (window.innerWidth <= 850 && document.querySelector('.sidebar').classList.contains('open')) {
+    toggleSidebar();
+  }
   document.querySelectorAll('.sidebar-item').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + tab));
   document.getElementById('topbarTitle').textContent = TAB_TITLES[tab] || tab;
