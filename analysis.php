@@ -80,48 +80,6 @@ if (isset($_GET['api'])) {
         exit;
     }
 
-    // SSE bot logs stream
-    if ($_GET['api'] === 'bot_logs_sse') {
-        header('Content-Type: text/event-stream');
-        header('Cache-Control: no-cache');
-        header('X-Accel-Buffering: no');
-        header('Connection: keep-alive');
-        if (ob_get_level()) ob_end_clean();
-        set_time_limit(0);
-        ignore_user_abort(true);
-
-        $lastLog = '';
-        $lastStatus = null;
-        $heartbeat = 0;
-        while (true) {
-            if (connection_aborted()) break;
-            $out = []; $code = -1;
-            exec("tmux has-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1", $out, $code);
-            $running = $code === 0;
-            $logs = '';
-            if ($running) {
-                $logOut = [];
-                exec("tmux capture-pane -t " . escapeshellarg($TMUX_NAME) . " -p -S -150 2>&1", $logOut);
-                $logs = implode("\n", $logOut);
-            }
-            if ($running !== $lastStatus || $logs !== $lastLog) {
-                $lastStatus = $running;
-                $lastLog = $logs;
-                $payload = json_encode(['running' => $running, 'logs' => $logs]);
-                echo "data: $payload\n\n";
-                flush();
-            }
-            // heartbeat every 30s
-            $heartbeat++;
-            if ($heartbeat >= 30) {
-                echo ": heartbeat\n\n";
-                flush();
-                $heartbeat = 0;
-            }
-            sleep(1);
-        }
-        exit;
-    }
 
     if ($_GET['api'] === 'bot_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $body = json_decode(file_get_contents('php://input'), true) ?? [];
@@ -131,6 +89,7 @@ if (isset($_GET['api'])) {
             exec("tmux send-keys -t " . escapeshellarg($TMUX_NAME) . " C-c 2>&1");
             usleep(600000);
             exec("tmux kill-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1");
+            exec("pkill -9 -f \"bot.py\" 2>&1");
             sleep(1);
         }
         $default_token = 'gY5gbEpJVhih5NL';
@@ -209,6 +168,7 @@ if (isset($_GET['api'])) {
         exec("tmux send-keys -t " . escapeshellarg($TMUX_NAME) . " C-c 2>&1");
         usleep(1500000);
         exec("tmux kill-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1");
+        exec("pkill -9 -f \"bot.py\" 2>&1");
         echo json_encode(['success'=>true]);
         exit;
     }
@@ -1331,33 +1291,36 @@ function switchTab(tab, el) {
 }
 
 // ─── SSE BOT LOGS ─────────────────────────────────────────────────────────────
+let logPollTimer = null;
+
 function startLogSSE() {
-  if (logSSE) logSSE.close();
+  stopLogSSE();
   const dot = document.getElementById('sseDot');
   const statusEl = document.getElementById('sseStatus');
-  dot.className = 'sse-dot off'; statusEl.textContent = 'Connecting...';
-  logSSE = new EventSource('?api=bot_logs_sse');
-  logSSE.onopen = () => {
-    dot.className = 'sse-dot'; statusEl.textContent = 'Live';
-  };
-  logSSE.onmessage = (ev) => {
+  dot.className = 'sse-dot'; statusEl.textContent = 'Live (Polling)';
+  
+  async function poll() {
     try {
-      const d = JSON.parse(ev.data);
+      const d = await apiFetch('?api=bot_status');
       updateBotUI(d.running, d.logs);
-    } catch(e) {}
-  };
-  logSSE.onerror = () => {
-    dot.className = 'sse-dot off'; statusEl.textContent = 'Disconnected — click ↻ to reconnect';
-    logSSE.close(); logSSE = null;
-    // Retry after 5s
-    setTimeout(() => {
-      if (document.getElementById('tab-control').classList.contains('active')) startLogSSE();
-    }, 5000);
-  };
+      dot.className = 'sse-dot'; statusEl.textContent = 'Live';
+    } catch(e) {
+      dot.className = 'sse-dot off'; statusEl.textContent = 'Error fetching logs';
+    }
+  }
+  
+  poll();
+  logPollTimer = setInterval(poll, 1500);
 }
+
 function stopLogSSE() {
-  if (logSSE) { logSSE.close(); logSSE = null; }
+  if (logPollTimer) { clearInterval(logPollTimer); logPollTimer = null; }
+  const dot = document.getElementById('sseDot');
+  const statusEl = document.getElementById('sseStatus');
+  if (dot) dot.className = 'sse-dot off';
+  if (statusEl) statusEl.textContent = 'Disconnected';
 }
+
 function reconnectSSE() { startLogSSE(); }
 
 function updateBotUI(running, logs) {
