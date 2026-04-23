@@ -182,12 +182,12 @@ if (isset($_GET['api'])) {
     if ($_GET['api'] === 'bot_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $body = json_decode(file_get_contents('php://input'), true) ?? [];
         $chk=[]; $chkCode=-1;
-        exec("tmux has-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1", $chk, $chkCode);
+        exec("tmux has-session -t =" . escapeshellarg($TMUX_NAME) . " 2>&1", $chk, $chkCode);
         if ($chkCode === 0) {
-            exec("tmux send-keys -t " . escapeshellarg($TMUX_NAME) . " C-c 2>&1");
+            exec("tmux send-keys -t =" . escapeshellarg($TMUX_NAME) . " C-c 2>&1");
             usleep(600000);
-            exec("tmux kill-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1");
-            exec("pkill -9 -f \"bot.py\" 2>&1");
+            exec("tmux kill-session -t =" . escapeshellarg($TMUX_NAME) . " 2>&1");
+            exec("pkill -9 -f \" bot\.py\" 2>&1");
             sleep(1);
         }
         $default_token = 'gY5gbEpJVhih5NL';
@@ -263,10 +263,10 @@ if (isset($_GET['api'])) {
     }
 
     if ($_GET['api'] === 'bot_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
-        exec("tmux send-keys -t " . escapeshellarg($TMUX_NAME) . " C-c 2>&1");
+        exec("tmux send-keys -t =" . escapeshellarg($TMUX_NAME) . " C-c 2>&1");
         usleep(1500000);
-        exec("tmux kill-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1");
-        exec("pkill -9 -f \"bot.py\" 2>&1");
+        exec("tmux kill-session -t =" . escapeshellarg($TMUX_NAME) . " 2>&1");
+        exec("pkill -9 -f \" bot\.py\" 2>&1");
         echo json_encode(['success'=>true]);
         exit;
     }
@@ -432,11 +432,11 @@ if (isset($_GET['api'])) {
         $body = json_decode(file_get_contents('php://input'), true) ?? [];
         $MGR_TMUX = 'bbot-manager';
         $chk=[]; $chkCode=-1;
-        exec("tmux has-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1", $chk, $chkCode);
+        exec("tmux has-session -t =" . escapeshellarg($MGR_TMUX) . " 2>&1", $chk, $chkCode);
         if ($chkCode === 0) {
-            exec("tmux send-keys -t " . escapeshellarg($MGR_TMUX) . " C-c 2>&1");
+            exec("tmux send-keys -t =" . escapeshellarg($MGR_TMUX) . " C-c 2>&1");
             usleep(500000);
-            exec("tmux kill-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1");
+            exec("tmux kill-session -t =" . escapeshellarg($MGR_TMUX) . " 2>&1");
         }
         
         // Write manager config
@@ -460,9 +460,9 @@ if (isset($_GET['api'])) {
 
     if ($_GET['api'] === 'manager_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $MGR_TMUX = 'bbot-manager';
-        exec("tmux send-keys -t " . escapeshellarg($MGR_TMUX) . " C-c 2>&1");
+        exec("tmux send-keys -t =" . escapeshellarg($MGR_TMUX) . " C-c 2>&1");
         usleep(500000);
-        exec("tmux kill-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1");
+        exec("tmux kill-session -t =" . escapeshellarg($MGR_TMUX) . " 2>&1");
         echo json_encode(['success'=>true]);
         exit;
     }
@@ -470,7 +470,7 @@ if (isset($_GET['api'])) {
     if ($_GET['api'] === 'manager_status') {
         $MGR_TMUX = 'bbot-manager';
         $chk=[]; $chkCode=-1;
-        exec("tmux has-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1", $chk, $chkCode);
+        exec("tmux has-session -t =" . escapeshellarg($MGR_TMUX) . " 2>&1", $chk, $chkCode);
         $running = ($chkCode===0);
         
         $state = [];
@@ -494,13 +494,13 @@ if (isset($_GET['api'])) {
     if ($_GET['api'] === 'bg_status') {
         $DAEMON_TMUX = 'market_daemon';
         $botChk=[]; $botCode=-1;
-        exec("tmux has-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1", $botChk, $botCode);
+        exec("tmux has-session -t =" . escapeshellarg($TMUX_NAME) . " 2>&1", $botChk, $botCode);
         $daemonChk=[]; $daemonCode=-1;
-        exec("tmux has-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1", $daemonChk, $daemonCode);
+        exec("tmux has-session -t =" . escapeshellarg($DAEMON_TMUX) . " 2>&1", $daemonChk, $daemonCode);
         $scanFile = $BOT_DIR . '/data/market_scan.json';
         $MGR_TMUX = 'bbot-manager';
         $mgrChk=[]; $mgrCode=-1;
-        exec("tmux has-session -t " . escapeshellarg($MGR_TMUX) . " 2>&1", $mgrChk, $mgrCode);
+        exec("tmux has-session -t =" . escapeshellarg($MGR_TMUX) . " 2>&1", $mgrChk, $mgrCode);
         echo json_encode([
             'bot_running'    => $botCode === 0,
             'daemon_running' => $daemonCode === 0,

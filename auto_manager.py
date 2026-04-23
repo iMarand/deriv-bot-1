@@ -114,10 +114,10 @@ def restart_bot(base_cmd, algo, ts, symbols):
     os.chmod(launcher_path, 0o755)
     
     # Kill existing
-    subprocess.run(f"tmux send-keys -t {TMUX_NAME} C-c 2>&1", shell=True, capture_output=True)
+    subprocess.run(f"tmux send-keys -t ={TMUX_NAME} C-c 2>&1", shell=True, capture_output=True)
     time.sleep(1)
-    subprocess.run(f"tmux kill-session -t {TMUX_NAME} 2>&1", shell=True, capture_output=True)
-    subprocess.run("pkill -9 -f \"bot.py\" 2>&1", shell=True, capture_output=True)
+    subprocess.run(f"tmux kill-session -t ={TMUX_NAME} 2>&1", shell=True, capture_output=True)
+    subprocess.run("pkill -9 -f \" bot\\.py\" 2>&1", shell=True, capture_output=True)
     time.sleep(1)
     
     # Start new
