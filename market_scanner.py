@@ -291,6 +291,12 @@ def _recommend_strategy(
 ) -> Tuple[str, str, str]:
     """Recommend (algorithm, trade_strategy, entry_signal).
 
+    CONSERVATIVE POLICY: Strongly prefers Even/Odd (digit-based) strategies
+    which have a measurable statistical edge via digit bias detection.
+    Rise/Fall (CALL/PUT) is only recommended with very strong pattern signals
+    because directional trades are essentially 50/50 and catastrophic with
+    Martingale stake escalation.
+
     entry_signal is one of: STRONG_ENTRY, GOOD_ENTRY, WAIT, DO_NOT_ENTER
     """
 
@@ -298,58 +304,50 @@ def _recommend_strategy(
     if vol_level == "EXTREME":
         return "adaptive", "even_odd", "DO_NOT_ENTER"
 
+    # ── High volatility → cautious, digit-only ──
+    if vol_level == "HIGH":
+        if is_biased and bias_mag >= 0.10 and pulse_score >= 0.65:
+            return "pulse", "even_odd", "GOOD_ENTRY"
+        if is_biased and bias_mag >= 0.08:
+            return "alphabloom", "even_odd", "WAIT"
+        return "adaptive", "even_odd", "DO_NOT_ENTER"
+
     # ── Mean-reverting + low/moderate vol → ideal for digit strategies ──
     if regime_name == "MEAN_REVERTING" and vol_level in ("LOW", "MODERATE"):
         if is_biased and bias_mag >= 0.06:
-            # Strong digit bias → use digit-based strategies
             if pulse_score >= 0.60:
                 return "pulse", "even_odd", "STRONG_ENTRY"
             elif pulse_score >= 0.40:
                 return "pulse", "even_odd", "GOOD_ENTRY"
             else:
                 return "alphabloom", "even_odd", "GOOD_ENTRY"
-        # Weak bias but mean-reverting → Roll Cake patterns work well
-        if rollcake_score >= 0.40:
+        # Weak bias → still prefer digit, only Rise/Fall with very strong signals
+        if rollcake_score >= 0.70 and vol_level == "LOW":
             return "pulse", "rise_fall_roll", "GOOD_ENTRY"
         return "ensemble", "even_odd", "WAIT"
 
-    # ── Trending regime → directional strategies ──
+    # ── Trending regime → prefer digit, directional only with very strong signals ──
     if regime_name == "TRENDING":
-        if vol_level == "HIGH":
-            # High vol + trending → Zigzag reversals
-            if zigzag_score >= 0.35:
-                return "novaburst", "rise_fall_zigzag", "GOOD_ENTRY"
-            return "adaptive", "higher_lower_zigzag", "WAIT"
-        else:
-            # Moderate/low vol + trending → Roll Cake or Zigzag
-            if rollcake_score >= 0.40:
-                return "pulse", "rise_fall_roll", "GOOD_ENTRY"
-            if zigzag_score >= 0.30:
-                return "novaburst", "rise_fall_zigzag", "GOOD_ENTRY"
-            # Digit bias is still usable in mild trending
-            if pulse_score >= 0.55:
-                return "pulse", "even_odd", "GOOD_ENTRY"
-            return "adaptive", "even_odd", "WAIT"
+        if is_biased and pulse_score >= 0.55:
+            return "pulse", "even_odd", "GOOD_ENTRY"
+        if is_biased and bias_mag >= 0.08:
+            return "alphabloom", "even_odd", "GOOD_ENTRY"
+        # Only use Rise/Fall with extremely strong pattern + low vol
+        if vol_level == "LOW" and rollcake_score >= 0.70:
+            return "pulse", "rise_fall_roll", "GOOD_ENTRY"
+        if vol_level == "LOW" and zigzag_score >= 0.65:
+            return "novaburst", "rise_fall_zigzag", "GOOD_ENTRY"
+        return "adaptive", "even_odd", "WAIT"
 
     # ── Choppy regime → cautious, digit strategies only ──
     if regime_name == "CHOPPY":
-        if vol_level == "HIGH":
-            return "adaptive", "even_odd", "DO_NOT_ENTER"
         if is_biased and bias_mag >= 0.08 and pulse_score >= 0.55:
             return "pulse", "even_odd", "GOOD_ENTRY"
-        if rollcake_score >= 0.45:
-            return "pulse", "over_under_roll", "WAIT"
         return "adaptive", "even_odd", "WAIT"
 
     # ── Unknown regime → default conservative ──
-    best_pattern = max(pulse_score, rollcake_score, zigzag_score)
-    if best_pattern >= 0.55 and vol_level != "HIGH":
-        if pulse_score >= rollcake_score and pulse_score >= zigzag_score:
-            return "pulse", "even_odd", "GOOD_ENTRY"
-        elif rollcake_score >= zigzag_score:
-            return "pulse", "rise_fall_roll", "GOOD_ENTRY"
-        else:
-            return "novaburst", "rise_fall_zigzag", "GOOD_ENTRY"
+    if is_biased and pulse_score >= 0.55:
+        return "pulse", "even_odd", "GOOD_ENTRY"
 
     return "adaptive", "even_odd", "WAIT"
 

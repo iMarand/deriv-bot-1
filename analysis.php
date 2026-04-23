@@ -2115,6 +2115,8 @@ function getAllowedStrategies() {
 }
 
 // Strategy recommendation that respects filters
+// CONSERVATIVE: strongly prefers Even/Odd digit strategies.
+// Rise/Fall only with very strong signals (>=0.70 rollcake, >=0.65 zigzag).
 function recommendForSymbol(d) {
   const allowedAlgos = getAllowedAlgos();
   const allowedTS = getAllowedStrategies();
@@ -2124,51 +2126,70 @@ function recommendForSymbol(d) {
   const regime = d.regime || 'UNKNOWN';
   const volLevel = v.level || 'UNKNOWN';
   const trad = d.tradability || 0;
+  const biasMag = dg.bias_magnitude || 0;
 
+  // Helper: pick first allowed algo/ts or fallback
+  const pickAlgo = (pref) => allowedAlgos.includes(pref) ? pref : (allowedAlgos[0]||'adaptive');
+  const pickTS = (pref) => allowedTS.includes(pref) ? pref : (allowedTS[0]||'even_odd');
+
+  // Extreme vol → stay out
   if (volLevel === 'EXTREME') {
-    const algo = allowedAlgos.includes('adaptive') ? 'adaptive' : (allowedAlgos[0]||'adaptive');
-    const ts = allowedTS.includes('even_odd') ? 'even_odd' : (allowedTS[0]||'even_odd');
-    return { algorithm: algo, trade_strategy: ts, entry_signal: 'DO_NOT_ENTER', tradability: trad };
+    return { algorithm: pickAlgo('adaptive'), trade_strategy: pickTS('even_odd'), entry_signal: 'DO_NOT_ENTER', tradability: trad };
   }
 
-  // Build candidates in priority order
+  // High vol → digit-only or stay out
+  if (volLevel === 'HIGH') {
+    if (dg.is_biased && biasMag >= 0.10 && (p.pulse?.score||0) >= 0.65) {
+      return matchFilter([{a:'pulse',t:'even_odd',s:'GOOD_ENTRY'}], allowedAlgos, allowedTS, trad);
+    }
+    if (dg.is_biased && biasMag >= 0.08) {
+      return matchFilter([{a:'alphabloom',t:'even_odd',s:'WAIT'}], allowedAlgos, allowedTS, trad);
+    }
+    return { algorithm: pickAlgo('adaptive'), trade_strategy: pickTS('even_odd'), entry_signal: 'DO_NOT_ENTER', tradability: trad };
+  }
+
   const candidates = [];
   const ps = p.pulse?.score||0, rs = p.rollcake?.score||0, zs = p.zigzag?.score||0;
   const biased = dg.is_biased;
 
+  // Mean-reverting → digit-first
   if (regime==='MEAN_REVERTING' && (volLevel==='LOW'||volLevel==='MODERATE')) {
-    if (biased && ps>=0.6) candidates.push({a:'pulse',t:'even_odd',s:'STRONG_ENTRY'});
-    if (biased && ps>=0.4) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-    if (biased) candidates.push({a:'alphabloom',t:'even_odd',s:'GOOD_ENTRY'});
-    if (rs>=0.4) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
+    if (biased && biasMag>=0.06 && ps>=0.6) candidates.push({a:'pulse',t:'even_odd',s:'STRONG_ENTRY'});
+    if (biased && biasMag>=0.06 && ps>=0.4) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+    if (biased && biasMag>=0.06) candidates.push({a:'alphabloom',t:'even_odd',s:'GOOD_ENTRY'});
+    // Only Rise/Fall with very strong signal
+    if (rs>=0.70 && volLevel==='LOW') candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
+    candidates.push({a:'ensemble',t:'even_odd',s:'WAIT'});
   }
+
+  // Trending → digit-first, directional only with very strong signals
   if (regime==='TRENDING') {
-    if (volLevel==='HIGH' && zs>=0.35) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
-    if (rs>=0.4) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
-    if (zs>=0.3) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
-    if (ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-  }
-  if (regime==='CHOPPY') {
-    if (volLevel==='HIGH') {
-      const algo = allowedAlgos.includes('adaptive') ? 'adaptive' : (allowedAlgos[0]||'adaptive');
-      const ts = allowedTS.includes('even_odd') ? 'even_odd' : (allowedTS[0]||'even_odd');
-      return { algorithm: algo, trade_strategy: ts, entry_signal: 'DO_NOT_ENTER', tradability: trad };
-    }
     if (biased && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+    if (biased && biasMag>=0.08) candidates.push({a:'alphabloom',t:'even_odd',s:'GOOD_ENTRY'});
+    if (volLevel==='LOW' && rs>=0.70) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
+    if (volLevel==='LOW' && zs>=0.65) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
+    candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
   }
-  // Fallbacks
-  if (ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
-  if (rs>=0.4) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
-  if (zs>=0.3) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
+
+  // Choppy → digit only
+  if (regime==='CHOPPY') {
+    if (biased && biasMag>=0.08 && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+    candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
+  }
+
+  // Unknown → conservative digit
+  if (biased && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
   candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
 
-  // Pick first that matches allowed filters
+  return matchFilter(candidates, allowedAlgos, allowedTS, trad);
+}
+
+function matchFilter(candidates, allowedAlgos, allowedTS, trad) {
   for (const c of candidates) {
     if (allowedAlgos.includes(c.a) && allowedTS.includes(c.t)) {
       return { algorithm: c.a, trade_strategy: c.t, entry_signal: c.s, tradability: trad };
     }
   }
-  // Nothing matched filters — use first allowed combo
   const algo = allowedAlgos[0] || 'adaptive';
   const ts = allowedTS[0] || 'even_odd';
   return { algorithm: algo, trade_strategy: ts, entry_signal: 'WAIT', tradability: trad };
