@@ -363,6 +363,75 @@ if (isset($_GET['api'])) {
         pclose($proc);
         exit;
     }
+    // ── daemon start (POST) ────────────────────────────────────────────────────
+    if ($_GET['api'] === 'daemon_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $interval = intval($body['interval'] ?? 30);
+        $appId    = intval($body['app_id']   ?? 1089);
+        if ($interval < 5)  $interval = 5;
+        if ($interval > 300) $interval = 300;
+        $DAEMON_TMUX = 'market_daemon';
+
+        // Kill existing daemon
+        $chk=[]; $chkCode=-1;
+        exec("tmux has-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1", $chk, $chkCode);
+        if ($chkCode === 0) {
+            exec("tmux send-keys -t " . escapeshellarg($DAEMON_TMUX) . " C-c 2>&1");
+            usleep(500000);
+            exec("tmux kill-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1");
+            sleep(1);
+        }
+
+        $cmd = sprintf(
+            "cd %s && python3 market_daemon.py --app-id %d --interval %d",
+            escapeshellarg($BOT_DIR), $appId, $interval
+        );
+        $tmuxCmd = "tmux new-session -d -s " . escapeshellarg($DAEMON_TMUX) . " " . escapeshellarg($cmd) . " 2>&1";
+        exec($tmuxCmd, $out, $ret);
+        sleep(2);
+        $v=[]; $vc=-1;
+        exec("tmux has-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1", $v, $vc);
+        echo json_encode(['success' => ($vc === 0), 'interval' => $interval]);
+        exit;
+    }
+
+    // ── daemon stop (POST) ─────────────────────────────────────────────────────
+    if ($_GET['api'] === 'daemon_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $DAEMON_TMUX = 'market_daemon';
+        exec("tmux send-keys -t " . escapeshellarg($DAEMON_TMUX) . " C-c 2>&1");
+        usleep(500000);
+        exec("tmux kill-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1");
+        echo json_encode(['success' => true]);
+        exit;
+    }
+
+    // ── daemon status (GET) ────────────────────────────────────────────────────
+    if ($_GET['api'] === 'daemon_status') {
+        $DAEMON_TMUX = 'market_daemon';
+        $chk=[]; $chkCode=-1;
+        exec("tmux has-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1", $chk, $chkCode);
+        $scanFile = $BOT_DIR . '/data/market_scan.json';
+        $fileAge = file_exists($scanFile) ? time() - filemtime($scanFile) : null;
+        echo json_encode([
+            'running' => ($chkCode === 0),
+            'file_exists' => file_exists($scanFile),
+            'file_age_seconds' => $fileAge,
+        ]);
+        exit;
+    }
+
+    // ── daemon scan (GET) — reads cached market_scan.json ──────────────────────
+    if ($_GET['api'] === 'daemon_scan') {
+        $scanFile = $BOT_DIR . '/data/market_scan.json';
+        if (!file_exists($scanFile)) {
+            echo json_encode(['error' => 'No scan data. Start the Market Daemon first.']);
+            exit;
+        }
+        $content = file_get_contents($scanFile);
+        header('Content-Type: application/json');
+        echo $content;
+        exit;
+    }
 
     http_response_code(400);
     echo json_encode(['error'=>'Unknown endpoint']);
@@ -1064,68 +1133,118 @@ canvas{width:100%!important;max-height:280px}
 
   <!-- ════════════════════════ TAB: SCANNER ════════════════════════ -->
   <div class="tab-content" id="tab-scanner">
-    <div class="ctrl-box" style="margin-bottom:18px">
-      <h3>&#128269; Market Volatility Scanner</h3>
-      <div style="font-size:.8rem;color:var(--text2);margin-bottom:16px;line-height:1.6">
-        Scans all synthetic indices in real-time. Analyses volatility regime, digit bias, and pattern signals to recommend strategy and entry timing. Results auto-update symbol selection in Bot Control.
+    <!-- Background Daemon -->
+    <div class="ctrl-box" style="margin-bottom:14px">
+      <h3>&#128268; Background Market Daemon</h3>
+      <div style="font-size:.78rem;color:var(--text2);margin-bottom:12px;line-height:1.5">
+        Subscribes to <strong>live tick streams</strong> for all indices and continuously updates analysis. Much faster than re-fetching history &mdash; results are instant.
       </div>
+      <div class="form-grid" style="max-width:500px">
+        <div class="form-group">
+          <label>Snapshot Interval</label>
+          <select id="fDaemonInterval">
+            <option value="10">Every 10 sec</option>
+            <option value="15">Every 15 sec</option>
+            <option value="30" selected>Every 30 sec</option>
+            <option value="60">Every 1 min</option>
+          </select>
+          <span class="hint">How often the daemon writes analysis to disk</span>
+        </div>
+        <div class="form-group">
+          <label>App ID</label>
+          <input type="number" id="fDaemonAppId" value="1089" step="1" min="1">
+        </div>
+      </div>
+      <div style="margin-top:12px;display:flex;gap:10px;align-items:center">
+        <button class="btn btn-primary" id="daemonStartBtn" onclick="startDaemon()">&#9654; Start Daemon</button>
+        <button class="btn btn-danger" id="daemonStopBtn" onclick="stopDaemon()" style="display:none">&#9209; Stop Daemon</button>
+        <div style="display:flex;align-items:center;gap:6px">
+          <div class="status-dot off" id="daemonDot"></div>
+          <span style="font-size:.78rem;color:var(--text3)" id="daemonLabel">Stopped</span>
+        </div>
+      </div>
+    </div>
+    <!-- Scan Controls -->
+    <div class="ctrl-box" style="margin-bottom:14px">
+      <h3>&#128269; Scan Configuration</h3>
       <div class="form-grid" style="max-width:700px">
         <div class="form-group">
-          <label>Lookback Period</label>
+          <label>Auto-Refresh Interval</label>
+          <select id="fScanInterval">
+            <option value="0">Off (manual only)</option>
+            <option value="0.5">Every 30 sec</option>
+            <option value="1" selected>Every 1 min</option>
+            <option value="2">Every 2 min</option>
+            <option value="5">Every 5 min</option>
+            <option value="10">Every 10 min</option>
+          </select>
+          <span class="hint">Read daemon cache and refresh cards</span>
+        </div>
+        <div class="form-group">
+          <label>Lookback (manual scan only)</label>
           <select id="fScanHours">
-            <option value="0.033">2 minutes</option>
-            <option value="0.083">5 minutes</option>
-            <option value="0.167">10 minutes</option>
-            <option value="0.25">15 minutes</option>
-            <option value="0.333">20 minutes</option>
-            <option value="0.5">30 minutes</option>
-            <option value="0.75">45 minutes</option>
+            <option value="0.033">2 min</option>
+            <option value="0.083">5 min</option>
+            <option value="0.167">10 min</option>
+            <option value="0.25">15 min</option>
+            <option value="0.5">30 min</option>
             <option value="1" selected>1 hour</option>
             <option value="2">2 hours</option>
             <option value="4">4 hours</option>
           </select>
-          <span class="hint">Shorter = faster scan, longer = more data</span>
+          <span class="hint">Used only for one-shot SSE scan (no daemon)</span>
         </div>
         <div class="form-group">
-          <label>Auto-Scan Interval</label>
-          <select id="fScanInterval">
-            <option value="0">Off (manual only)</option>
-            <option value="2">Every 2 min</option>
-            <option value="5" selected>Every 5 min</option>
-            <option value="10">Every 10 min</option>
-            <option value="15">Every 15 min</option>
-            <option value="30">Every 30 min</option>
-          </select>
-          <span class="hint">Continuously re-scan and update bot symbols</span>
-        </div>
-        <div class="form-group">
-          <label>App ID</label>
+          <label>Scan App ID</label>
           <input type="number" id="fScanAppId" value="1089" step="1" min="1">
         </div>
       </div>
-
-      <!-- Scanner integration toggles -->
+      <!-- Allowed Algorithms -->
+      <div style="margin-top:14px">
+        <div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);font-weight:600;margin-bottom:6px">Allowed Algorithms</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px" id="algoFilter">
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="algoFilterChk" value="pulse" checked style="accent-color:var(--green)"> Pulse</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="algoFilterChk" value="alphabloom" checked style="accent-color:var(--green)"> AlphaBloom</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="algoFilterChk" value="ensemble" checked style="accent-color:var(--green)"> Ensemble</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="algoFilterChk" value="novaburst" checked style="accent-color:var(--green)"> NovaBurst</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="algoFilterChk" value="adaptive" checked style="accent-color:var(--green)"> Adaptive</label>
+        </div>
+      </div>
+      <!-- Allowed Trade Strategies -->
+      <div style="margin-top:10px">
+        <div style="font-size:.68rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text2);font-weight:600;margin-bottom:6px">Allowed Trade Strategies</div>
+        <div style="display:flex;flex-wrap:wrap;gap:6px" id="tsFilter">
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="even_odd" checked style="accent-color:var(--green)"> Even/Odd</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="rise_fall_roll" checked style="accent-color:var(--green)"> Rise/Fall Roll</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="rise_fall_zigzag" checked style="accent-color:var(--green)"> Rise/Fall Zigzag</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="higher_lower_roll" style="accent-color:var(--green)"> Higher/Lower Roll</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="higher_lower_zigzag" style="accent-color:var(--green)"> Higher/Lower Zigzag</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="over_under_roll" style="accent-color:var(--green)"> Over/Under Roll</label>
+          <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--bg3);border:1px solid var(--border);border-radius:4px;cursor:pointer;font-size:.75rem"><input type="checkbox" class="tsFilterChk" value="touch_notouch_zigzag" style="accent-color:var(--green)"> Touch/NoTouch Zigzag</label>
+        </div>
+      </div>
+      <!-- Integration toggles -->
       <div style="margin-top:14px;background:var(--bg3);border-radius:var(--radius-sm);padding:4px 14px;max-width:700px">
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Auto-Exclude DO_NOT_ENTER</div>
-            <div class="toggle-sub">Automatically uncheck symbols flagged as unsafe in Bot Control</div>
+            <div class="toggle-sub">Automatically uncheck unsafe symbols in Bot Control</div>
           </div>
           <label class="toggle"><input type="checkbox" id="tAutoExclude" checked><span class="toggle-slider"></span></label>
         </div>
         <div class="toggle-row">
           <div>
             <div class="toggle-label">Auto-Apply Best Strategy</div>
-            <div class="toggle-sub">Set algorithm + trade strategy to the top-ranked symbol's recommendation</div>
+            <div class="toggle-sub">Set algorithm + trade strategy from top-ranked result</div>
           </div>
           <label class="toggle"><input type="checkbox" id="tAutoStrategy"><span class="toggle-slider"></span></label>
         </div>
       </div>
-
       <div style="margin-top:14px;display:flex;gap:10px;align-items:center;flex-wrap:wrap">
-        <button class="btn btn-primary" id="scanBtn" onclick="startScan()" style="min-width:180px">&#128269; Scan Market</button>
+        <button class="btn btn-primary" id="scanBtn" onclick="startScan()" style="min-width:160px">&#128269; Manual Scan</button>
         <button class="btn btn-danger" id="scanStopBtn" onclick="stopScan()" style="display:none">&#9209; Stop</button>
-        <button class="btn btn-ghost" id="autoScanBtn" onclick="toggleAutoScan()" style="min-width:160px">&#128260; Start Auto-Scan</button>
+        <button class="btn btn-ghost" id="daemonRefreshBtn" onclick="refreshFromDaemon()">&#128260; Refresh from Daemon</button>
+        <button class="btn btn-ghost" id="autoScanBtn" onclick="toggleAutoScan()" style="min-width:160px">&#128260; Start Auto-Refresh</button>
         <div class="scan-progress" id="scanProgress" style="display:none">
           <div class="spinner" style="width:14px;height:14px;border-width:2px"></div>
           <span id="scanProgressText">Connecting...</span>
@@ -1133,6 +1252,7 @@ canvas{width:100%!important;max-height:280px}
         </div>
       </div>
     </div>
+    <!-- Results -->
     <div id="scanResultsWrap" style="display:none">
       <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px;flex-wrap:wrap;gap:8px">
         <h3 style="font-size:.75rem;text-transform:uppercase;letter-spacing:.08em;color:var(--text2);font-weight:600">Scan Results <span id="scanResultCount" style="color:var(--text3);font-weight:400"></span></h3>
@@ -1986,7 +2106,160 @@ function symSelectAll(checked) {
   updateCmd();
 }
 
-// ─── AUTO-SCAN ───────────────────────────────────────────────────────────────
+// ─── ALGO / STRATEGY FILTERS ─────────────────────────────────────────────────
+function getAllowedAlgos() {
+  return [...document.querySelectorAll('.algoFilterChk:checked')].map(c => c.value);
+}
+function getAllowedStrategies() {
+  return [...document.querySelectorAll('.tsFilterChk:checked')].map(c => c.value);
+}
+
+// Strategy recommendation that respects filters
+function recommendForSymbol(d) {
+  const allowedAlgos = getAllowedAlgos();
+  const allowedTS = getAllowedStrategies();
+  const v = d.volatility || {};
+  const dg = d.digits || {};
+  const p = d.patterns || {};
+  const regime = d.regime || 'UNKNOWN';
+  const volLevel = v.level || 'UNKNOWN';
+  const trad = d.tradability || 0;
+
+  if (volLevel === 'EXTREME') {
+    const algo = allowedAlgos.includes('adaptive') ? 'adaptive' : (allowedAlgos[0]||'adaptive');
+    const ts = allowedTS.includes('even_odd') ? 'even_odd' : (allowedTS[0]||'even_odd');
+    return { algorithm: algo, trade_strategy: ts, entry_signal: 'DO_NOT_ENTER', tradability: trad };
+  }
+
+  // Build candidates in priority order
+  const candidates = [];
+  const ps = p.pulse?.score||0, rs = p.rollcake?.score||0, zs = p.zigzag?.score||0;
+  const biased = dg.is_biased;
+
+  if (regime==='MEAN_REVERTING' && (volLevel==='LOW'||volLevel==='MODERATE')) {
+    if (biased && ps>=0.6) candidates.push({a:'pulse',t:'even_odd',s:'STRONG_ENTRY'});
+    if (biased && ps>=0.4) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+    if (biased) candidates.push({a:'alphabloom',t:'even_odd',s:'GOOD_ENTRY'});
+    if (rs>=0.4) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
+  }
+  if (regime==='TRENDING') {
+    if (volLevel==='HIGH' && zs>=0.35) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
+    if (rs>=0.4) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
+    if (zs>=0.3) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
+    if (ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+  }
+  if (regime==='CHOPPY') {
+    if (volLevel==='HIGH') {
+      const algo = allowedAlgos.includes('adaptive') ? 'adaptive' : (allowedAlgos[0]||'adaptive');
+      const ts = allowedTS.includes('even_odd') ? 'even_odd' : (allowedTS[0]||'even_odd');
+      return { algorithm: algo, trade_strategy: ts, entry_signal: 'DO_NOT_ENTER', tradability: trad };
+    }
+    if (biased && ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+  }
+  // Fallbacks
+  if (ps>=0.55) candidates.push({a:'pulse',t:'even_odd',s:'GOOD_ENTRY'});
+  if (rs>=0.4) candidates.push({a:'pulse',t:'rise_fall_roll',s:'GOOD_ENTRY'});
+  if (zs>=0.3) candidates.push({a:'novaburst',t:'rise_fall_zigzag',s:'GOOD_ENTRY'});
+  candidates.push({a:'adaptive',t:'even_odd',s:'WAIT'});
+
+  // Pick first that matches allowed filters
+  for (const c of candidates) {
+    if (allowedAlgos.includes(c.a) && allowedTS.includes(c.t)) {
+      return { algorithm: c.a, trade_strategy: c.t, entry_signal: c.s, tradability: trad };
+    }
+  }
+  // Nothing matched filters — use first allowed combo
+  const algo = allowedAlgos[0] || 'adaptive';
+  const ts = allowedTS[0] || 'even_odd';
+  return { algorithm: algo, trade_strategy: ts, entry_signal: 'WAIT', tradability: trad };
+}
+
+// ─── DAEMON CONTROL ──────────────────────────────────────────────────────────
+async function startDaemon() {
+  const interval = document.getElementById('fDaemonInterval').value;
+  const appId = document.getElementById('fDaemonAppId').value;
+  document.getElementById('daemonStartBtn').disabled = true;
+  document.getElementById('daemonStartBtn').innerHTML = '<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> Starting...';
+  try {
+    await apiFetch('?api=daemon_start', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({interval: parseInt(interval), app_id: parseInt(appId)})
+    });
+  } catch(e) {}
+  setTimeout(refreshDaemonStatus, 1500);
+}
+
+async function stopDaemon() {
+  try {
+    await apiFetch('?api=daemon_stop', {method:'POST'});
+  } catch(e) {}
+  setTimeout(refreshDaemonStatus, 1000);
+}
+
+async function refreshDaemonStatus() {
+  try {
+    const data = await apiFetch('?api=daemon_status');
+    const dot = document.getElementById('daemonDot');
+    const lbl = document.getElementById('daemonLabel');
+    const startBtn = document.getElementById('daemonStartBtn');
+    const stopBtn = document.getElementById('daemonStopBtn');
+    if (data.running) {
+      dot.className = 'status-dot on';
+      lbl.textContent = 'Running';
+      lbl.style.color = 'var(--green)';
+      startBtn.style.display = 'none';
+      stopBtn.style.display = '';
+    } else {
+      dot.className = 'status-dot off';
+      lbl.textContent = 'Stopped';
+      lbl.style.color = 'var(--text3)';
+      startBtn.style.display = '';
+      startBtn.disabled = false;
+      startBtn.innerHTML = '&#9654; Start Daemon';
+      stopBtn.style.display = 'none';
+    }
+    if (data.file_exists && data.file_age_seconds !== null) {
+      lbl.textContent += ` (data ${data.file_age_seconds}s ago)`;
+    }
+  } catch(e) {}
+}
+
+// ─── REFRESH FROM DAEMON CACHE ───────────────────────────────────────────────
+async function refreshFromDaemon() {
+  try {
+    const data = await apiFetch('?api=daemon_scan');
+    if (data.error) { alert(data.error); return; }
+    const results = data.results || [];
+    scanResults = [];
+    const grid = document.getElementById('scanResults');
+    const wrap = document.getElementById('scanResultsWrap');
+    grid.innerHTML = '';
+    wrap.style.display = '';
+
+    results.forEach(d => {
+      // Apply recommendation using filters
+      d.recommendation = recommendForSymbol(d);
+      d.type = 'result';
+      d.status = d.status || 'OK';
+      scanResults.push(d);
+      renderScanCard(d, grid);
+    });
+
+    document.getElementById('scanResultCount').textContent = `(${scanResults.length})`;
+    const ts = data.updated_at || new Date().toLocaleTimeString();
+    document.getElementById('scanTimestamp').textContent = `Daemon: ${ts}`;
+
+    // Auto-apply
+    if (document.getElementById('tAutoExclude').checked || autoScanRunning) {
+      applyAllScanResults();
+    }
+  } catch(e) {
+    console.error('Daemon refresh failed:', e);
+  }
+}
+
+// ─── AUTO-SCAN (reads daemon cache) ──────────────────────────────────────────
 let autoScanTimer = null;
 let autoScanRunning = false;
 
@@ -1999,20 +2272,18 @@ function toggleAutoScan() {
 }
 
 function startAutoScan() {
-  const intervalMin = parseInt(document.getElementById('fScanInterval').value) || 0;
+  const intervalMin = parseFloat(document.getElementById('fScanInterval').value) || 0;
   if (intervalMin <= 0) {
-    alert('Set Auto-Scan Interval to a value > 0 first.');
+    alert('Set Auto-Refresh Interval first.');
     return;
   }
   autoScanRunning = true;
   const btn = document.getElementById('autoScanBtn');
-  btn.innerHTML = '&#9209; Stop Auto-Scan';
+  btn.innerHTML = '&#9209; Stop Auto-Refresh';
   btn.className = 'btn btn-danger';
-  startScan(); // run first scan immediately
+  refreshFromDaemon(); // immediate first refresh
   autoScanTimer = setInterval(() => {
-    if (!scanSource) { // only start new scan if previous finished
-      startScan();
-    }
+    refreshFromDaemon();
   }, intervalMin * 60 * 1000);
 }
 
@@ -2020,7 +2291,7 @@ function stopAutoScan() {
   autoScanRunning = false;
   if (autoScanTimer) { clearInterval(autoScanTimer); autoScanTimer = null; }
   const btn = document.getElementById('autoScanBtn');
-  btn.innerHTML = '&#128260; Start Auto-Scan';
+  btn.innerHTML = '&#128260; Start Auto-Refresh';
   btn.className = 'btn btn-ghost';
 }
 
@@ -2028,6 +2299,7 @@ function stopAutoScan() {
 initSymChecklist();
 onStrategyChange();
 init();
+refreshDaemonStatus();
 </script>
 </body>
 </html>
