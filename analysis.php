@@ -2735,10 +2735,17 @@ async function toggleManager() {
       return;
     }
     
-    // Build base_cmd
-    updateCmd(); // Ensures cmd string is up to date
-    let baseCmd = document.getElementById('cmdCode').textContent;
-    baseCmd = baseCmd.replace(/python3 bot\.py/, 'python3 bot.py');
+    // Build clean base_cmd
+    const p = buildParams();
+    let baseCmd = `python3 bot.py --token ${p.token} --account-mode ${p.mode} --base-stake ${p.base_stake.toFixed(2)} --martingale ${p.martingale.toFixed(1)} --max-stake ${p.max_stake.toFixed(0)} --score-threshold ${p.threshold.toFixed(2)}`;
+    if (p.strategy==='alphabloom') baseCmd += ` --ab-window ${p.ab_window}`;
+    if (p.disable_kelly) baseCmd += ' --disable-kelly';
+    if (p.disable_risk)  baseCmd += ' --disable-risk-engine';
+    if (p.ml_filter && p.strategy!=='adaptive') baseCmd += ' --ml-filter';
+    if ((p.ml_filter||p.strategy==='adaptive') && p.ml_threshold!==null) baseCmd += ` --ml-threshold ${p.ml_threshold.toFixed(2)}`;
+    if (p.strategy==='adaptive') baseCmd += ` --hotness-cold ${p.hotness_cold.toFixed(2)} --hotness-probe ${p.hotness_probe} --vol-skip-pct ${p.vol_skip_pct.toFixed(2)} --ml-idle-minutes ${p.ml_idle_minutes.toFixed(0)} --ml-floor ${p.ml_floor.toFixed(2)}`;
+    if (p.profit_target!==null) baseCmd += ` --profit-target ${p.profit_target}`;
+    if (p.loss_limit!==null)    baseCmd += ` --loss-limit ${p.loss_limit}`;
     
     try {
       await apiPost('?api=manager_start', {
