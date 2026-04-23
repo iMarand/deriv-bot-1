@@ -58,6 +58,104 @@ if (isset($_GET['api'])) {
         exit;
     }
 
+    if ($_GET['api'] === 'summary_stats') {
+        $files = glob($DATA_DIR . '/*.json');
+        if (!$files) $files = [];
+        
+        $todayStart = strtotime("today");
+        $weekStart = strtotime("-7 days");
+        $monthStart = strtotime("-30 days");
+        
+        $out = [
+            'today' => ['trades'=>0, 'wins'=>0, 'losses'=>0, 'net_pnl'=>0, 'sessions'=>0, 'start_bal'=>null, 'end_bal'=>null, 'max_win_streak'=>0, 'max_loss_streak'=>0, 'algo'=>[], 'strategy'=>[]],
+            'weekly' => ['trades'=>0, 'wins'=>0, 'losses'=>0, 'net_pnl'=>0, 'sessions'=>0, 'start_bal'=>null, 'end_bal'=>null, 'max_win_streak'=>0, 'max_loss_streak'=>0, 'algo'=>[], 'strategy'=>[]],
+            'monthly' => ['trades'=>0, 'wins'=>0, 'losses'=>0, 'net_pnl'=>0, 'sessions'=>0, 'start_bal'=>null, 'end_bal'=>null, 'max_win_streak'=>0, 'max_loss_streak'=>0, 'algo'=>[], 'strategy'=>[]],
+            'daily_pnl' => []
+        ];
+
+        usort($files, fn($a, $b) => filemtime($a) <=> filemtime($b));
+
+        foreach ($files as $f) {
+            $name = basename($f);
+            if ($name === 'ml_filter.json' || $name === 'market_scan.json') continue;
+            $raw = @file_get_contents($f);
+            if (!$raw) continue;
+            $d = json_decode($raw, true);
+            if (!$d || !isset($d['session'])) continue;
+            
+            $sess = $d['session'] ?? [];
+            $sum  = $d['summary'] ?? [];
+            $trades = $d['trades'] ?? [];
+            
+            $ts = $sess['started_at'] ?? filemtime($f);
+            $dayStr = date('Y-m-d', $ts);
+            
+            $t_count = $sum['trade_count'] ?? 0;
+            $t_wins = $sum['wins'] ?? 0;
+            $t_losses = $sum['losses'] ?? 0;
+            $t_pnl = $sum['net_pnl'] ?? 0;
+            $algo = $sess['strategy'] ?? 'Unknown';
+            $strat = $sess['trade_strategy'] ?? 'Unknown';
+            
+            $sess_max_win = 0; $sess_max_loss = 0;
+            $curType = null; $curLen = 0;
+            foreach ($trades as $t) {
+                if (!isset($t['result'])) continue;
+                if ($curType === null) { $curType = $t['result']; $curLen = 1; }
+                else if ($t['result'] === $curType) { $curLen++; }
+                else {
+                    if ($curType === 'win' && $curLen > $sess_max_win) $sess_max_win = $curLen;
+                    if ($curType === 'loss' && $curLen > $sess_max_loss) $sess_max_loss = $curLen;
+                    $curType = $t['result']; $curLen = 1;
+                }
+            }
+            if ($curType === 'win' && $curLen > $sess_max_win) $sess_max_win = $curLen;
+            if ($curType === 'loss' && $curLen > $sess_max_loss) $sess_max_loss = $curLen;
+
+            if (!isset($out['daily_pnl'][$dayStr])) {
+                $out['daily_pnl'][$dayStr] = 0;
+            }
+            $out['daily_pnl'][$dayStr] += $t_pnl;
+
+            $buckets = [];
+            if ($ts >= $todayStart) $buckets[] = 'today';
+            if ($ts >= $weekStart) $buckets[] = 'weekly';
+            if ($ts >= $monthStart) $buckets[] = 'monthly';
+            
+            foreach ($buckets as $b) {
+                $out[$b]['trades'] += $t_count;
+                $out[$b]['wins'] += $t_wins;
+                $out[$b]['losses'] += $t_losses;
+                $out[$b]['net_pnl'] += $t_pnl;
+                $out[$b]['sessions'] += 1;
+                
+                if ($out[$b]['start_bal'] === null) $out[$b]['start_bal'] = $sess['initial_equity'] ?? 0;
+                $out[$b]['end_bal'] = $sess['current_equity'] ?? 0;
+                
+                if ($sess_max_win > $out[$b]['max_win_streak']) $out[$b]['max_win_streak'] = $sess_max_win;
+                if ($sess_max_loss > $out[$b]['max_loss_streak']) $out[$b]['max_loss_streak'] = $sess_max_loss;
+                
+                if (!isset($out[$b]['algo'][$algo])) $out[$b]['algo'][$algo] = ['pnl'=>0, 'trades'=>0];
+                $out[$b]['algo'][$algo]['pnl'] += $t_pnl;
+                $out[$b]['algo'][$algo]['trades'] += $t_count;
+                
+                if (!isset($out[$b]['strategy'][$strat])) $out[$b]['strategy'][$strat] = ['pnl'=>0, 'trades'=>0];
+                $out[$b]['strategy'][$strat]['pnl'] += $t_pnl;
+                $out[$b]['strategy'][$strat]['trades'] += $t_count;
+            }
+        }
+        
+        ksort($out['daily_pnl']);
+        $pnl_arr = [];
+        foreach ($out['daily_pnl'] as $k => $v) {
+            $pnl_arr[] = ['date' => $k, 'pnl' => $v];
+        }
+        $out['daily_pnl'] = $pnl_arr;
+
+        echo json_encode($out);
+        exit;
+    }
+
     if ($_GET['api'] === 'session' && isset($_GET['file'])) {
         $file = basename($_GET['file']);
         $path = $DATA_DIR . '/' . $file;
@@ -745,6 +843,9 @@ canvas{width:100%!important}
     <span class="si-icon">📊</span> Sessions
     <span class="si-badge" id="sessCount">0</span>
   </div>
+  <div class="sidebar-item" data-tab="summary" onclick="switchTab('summary',this)">
+    <span class="si-icon">📈</span> Summary
+  </div>
   <div class="sidebar-section">Bot</div>
   <div class="sidebar-item" data-tab="control" onclick="switchTab('control',this)">
     <span class="si-icon">🤖</span> Bot Control
@@ -856,6 +957,51 @@ canvas{width:100%!important}
             <table class="trade-table">
               <thead><tr><th>#</th><th>Time</th><th>Symbol</th><th>Type</th><th>Result</th><th>Stake</th><th>Profit</th><th>Payout</th><th>Cum P&L</th><th>Equity</th></tr></thead>
               <tbody id="tradeBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ═══════════════ SUMMARY TAB ═══════════════ -->
+    <div class="tab-content" id="tab-summary">
+      <div class="page-header" style="display:flex;justify-content:space-between;align-items:flex-end;flex-wrap:wrap;gap:15px">
+        <div>
+          <h2>Performance Summary</h2>
+          <p>Aggregated metrics across all sessions and strategies</p>
+        </div>
+        <div class="mode-group" style="width:280px;flex-shrink:0">
+          <button class="mode-btn active-demo" id="sumTfToday" onclick="setSumTf('today')">Today</button>
+          <button class="mode-btn" id="sumTfWeekly" onclick="setSumTf('weekly')">Weekly</button>
+          <button class="mode-btn" id="sumTfMonthly" onclick="setSumTf('monthly')">Monthly</button>
+        </div>
+      </div>
+
+      <div class="stat-row" id="sumStatsRow"></div>
+      
+      <div class="chart-row">
+        <div class="chart-card" style="grid-column:span 2">
+          <div class="ch-head"><h4>Daily P&L Progression</h4></div>
+          <div class="chart-body" style="height:220px"><canvas id="sumPnlChart"></canvas></div>
+        </div>
+      </div>
+      
+      <div class="chart-row" style="grid-template-columns:1fr 1fr">
+        <div class="card">
+          <div class="card-header"><h3>Algorithm Breakdown</h3></div>
+          <div class="card-body">
+            <table class="trade-table">
+              <thead><tr><th>Algorithm</th><th style="text-align:right">Trades</th><th style="text-align:right">P&L</th></tr></thead>
+              <tbody id="sumAlgoBody"></tbody>
+            </table>
+          </div>
+        </div>
+        <div class="card">
+          <div class="card-header"><h3>Strategy Breakdown</h3></div>
+          <div class="card-body">
+            <table class="trade-table">
+              <thead><tr><th>Strategy</th><th style="text-align:right">Trades</th><th style="text-align:right">P&L</th></tr></thead>
+              <tbody id="sumStratBody"></tbody>
             </table>
           </div>
         </div>
@@ -1307,7 +1453,7 @@ let currentMode = 'demo';
 let logSSE = null; // SSE connection for bot logs
 
 // ─── TABS ─────────────────────────────────────────────────────────────────────
-const TAB_TITLES = { analytics: 'Session Analytics', control: 'Bot Control', training: 'ML Training', scanner: 'Market Scanner' };
+const TAB_TITLES = { analytics: 'Session Analytics', summary: 'Performance Summary', control: 'Bot Control', training: 'ML Training', scanner: 'Market Scanner' };
 function switchTab(tab, el) {
   document.querySelectorAll('.sidebar-item').forEach(b => b.classList.toggle('active', b.dataset.tab === tab));
   document.querySelectorAll('.tab-content').forEach(c => c.classList.toggle('active', c.id === 'tab-' + tab));
@@ -1315,6 +1461,7 @@ function switchTab(tab, el) {
   if (tab === 'control') { startLogSSE(); }
   else { stopLogSSE(); }
   if (tab === 'training') { refreshMlStatus(); loadMlFiles(); }
+  if (tab === 'summary') { loadSummary(); }
 }
 
 // ─── SSE BOT LOGS ─────────────────────────────────────────────────────────────
@@ -1475,12 +1622,140 @@ async function loadSessions(append = false, silent = false) {
 function refreshAll() {
   loadSessions(false, true);
   pollBgStatus();
+  if (document.getElementById('tab-summary').classList.contains('active')) {
+    loadSummary(true);
+  }
 }
 
 document.getElementById('autoRefresh').addEventListener('change', function() {
   clearInterval(autoTimer);
   if (this.checked) autoTimer = setInterval(refreshAll, 10000);
 });
+
+// ─── SUMMARY DASHBOARD ────────────────────────────────────────────────────────
+let summaryData = null;
+let currentSumTf = 'today';
+let sumPnlChart = null;
+
+async function loadSummary(silent = false) {
+  if (!silent) {
+    document.getElementById('sumStatsRow').innerHTML = '<div style="padding:20px;color:var(--text3)"><div class="spinner" style="margin-right:8px;border-width:2px;width:14px;height:14px"></div> Loading summary...</div>';
+  }
+  try {
+    summaryData = await apiFetch('?api=summary_stats');
+    renderSummary();
+  } catch(e) {
+    console.error('Summary error:', e);
+    document.getElementById('sumStatsRow').innerHTML = '<div style="color:var(--red-light);padding:20px">Error loading summary.</div>';
+  }
+}
+
+function setSumTf(tf) {
+  currentSumTf = tf;
+  document.getElementById('sumTfToday').className = 'mode-btn' + (tf==='today'?' active-demo':'');
+  document.getElementById('sumTfWeekly').className = 'mode-btn' + (tf==='weekly'?' active-demo':'');
+  document.getElementById('sumTfMonthly').className = 'mode-btn' + (tf==='monthly'?' active-demo':'');
+  if (summaryData) renderSummary();
+}
+
+function renderSummary() {
+  if (!summaryData) return;
+  const d = summaryData[currentSumTf];
+  if (!d) return;
+  
+  const pnl = d.net_pnl || 0;
+  const pnlCls = pnl >= 0 ? 'c-green' : 'c-red';
+  const wr = d.trades > 0 ? ((d.wins / d.trades) * 100).toFixed(1) : '0.0';
+  
+  document.getElementById('sumStatsRow').innerHTML = `
+    <div class="stat-card">
+      <div class="sc-title">TOTAL P&L</div>
+      <div class="sc-val ${pnlCls}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-title">TRADES / WIN RATE</div>
+      <div class="sc-val">${d.trades} <span style="font-size:1rem;color:var(--text3)">(${wr}%)</span></div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-title">START &rarr; END BAL</div>
+      <div class="sc-val" style="font-size:1.1rem">$${(d.start_bal||0).toFixed(2)} <span style="color:var(--text3)">&rarr;</span> $${(d.end_bal||0).toFixed(2)}</div>
+    </div>
+    <div class="stat-card">
+      <div class="sc-title">BEST / WORST STREAK</div>
+      <div class="sc-val"><span class="c-green">${d.max_win_streak} W</span> <span style="color:var(--text3)">/</span> <span class="c-red">${d.max_loss_streak} L</span></div>
+    </div>
+  `;
+  
+  const sortMap = (obj) => Object.entries(obj).map(([k,v]) => ({name:k, ...v})).sort((a,b) => b.pnl - a.pnl);
+  
+  const algos = sortMap(d.algo);
+  document.getElementById('sumAlgoBody').innerHTML = algos.map(a => `
+    <tr>
+      <td><span class="sym-tag" style="background:var(--surface3);border-color:var(--border2);color:var(--text)">${a.name}</span></td>
+      <td style="text-align:right">${a.trades}</td>
+      <td style="text-align:right" class="${a.pnl>=0?'c-green':'c-red'}">${a.pnl>=0?'+':''}$${a.pnl.toFixed(2)}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="3" style="text-align:center;color:var(--text3)">No data</td></tr>';
+  
+  const strats = sortMap(d.strategy);
+  document.getElementById('sumStratBody').innerHTML = strats.map(s => `
+    <tr>
+      <td><span class="badge badge-mode-demo" style="background:var(--surface3);color:var(--text)">${s.name}</span></td>
+      <td style="text-align:right">${s.trades}</td>
+      <td style="text-align:right" class="${s.pnl>=0?'c-green':'c-red'}">${s.pnl>=0?'+':''}$${s.pnl.toFixed(2)}</td>
+    </tr>
+  `).join('') || '<tr><td colspan="3" style="text-align:center;color:var(--text3)">No data</td></tr>';
+
+  const pnlData = summaryData.daily_pnl || [];
+  let labels = pnlData.map(x => x.date.slice(5)); // MM-DD
+  let dataVals = pnlData.map(x => x.pnl);
+  
+  if (currentSumTf === 'today' && pnlData.length > 0) {
+    labels = [labels[labels.length-1]];
+    dataVals = [dataVals[dataVals.length-1]];
+  } else if (currentSumTf === 'weekly' && pnlData.length > 7) {
+    labels = labels.slice(-7);
+    dataVals = dataVals.slice(-7);
+  } else if (currentSumTf === 'monthly' && pnlData.length > 30) {
+    labels = labels.slice(-30);
+    dataVals = dataVals.slice(-30);
+  }
+  
+  const bgColors = dataVals.map(v => v>=0 ? 'rgba(56,161,105,0.7)' : 'rgba(229,62,62,0.7)');
+  const brColors = dataVals.map(v => v>=0 ? '#38a169' : '#e53e3e');
+  
+  if (sumPnlChart) {
+    sumPnlChart.data.labels = labels;
+    sumPnlChart.data.datasets[0].data = dataVals;
+    sumPnlChart.data.datasets[0].backgroundColor = bgColors;
+    sumPnlChart.data.datasets[0].borderColor = brColors;
+    sumPnlChart.update('none');
+  } else {
+    const ctx = document.getElementById('sumPnlChart').getContext('2d');
+    sumPnlChart = new Chart(ctx, {
+      type: 'bar',
+      data: {
+        labels,
+        datasets: [{
+          label: 'Daily P&L',
+          data: dataVals,
+          backgroundColor: bgColors,
+          borderColor: brColors,
+          borderWidth: 1,
+          borderRadius: 3
+        }]
+      },
+      options: {
+        ...baseOpts(220),
+        plugins: { legend: { display: false } },
+        scales: {
+          x: { grid:{color:'rgba(255,255,255,0.05)',drawBorder:false}, ticks:{color:TICK_COLOR,font:{family:CHART_FONT,size:10}} },
+          y: { grid:{color:'rgba(255,255,255,0.05)',drawBorder:false}, ticks:{color:TICK_COLOR,font:{family:CHART_FONT,size:10},callback:v=>'$'+v.toFixed(0)} }
+        }
+      }
+    });
+  }
+}
 
 // ─── SESSION GRID ─────────────────────────────────────────────────────────────
 function renderSessionGrid(append = false, newSessions = null, silent = false) {
