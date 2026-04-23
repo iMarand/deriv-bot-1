@@ -442,8 +442,16 @@ if (isset($_GET['api'])) {
         // Write manager config
         file_put_contents($BOT_DIR . '/data/manager_config.json', json_encode($body));
         
-        $cmd = sprintf("cd %s && python3 auto_manager.py", escapeshellarg($BOT_DIR));
-        $tmuxCmd = "tmux new-session -d -s " . escapeshellarg($MGR_TMUX) . " " . escapeshellarg($cmd) . " 2>&1";
+        // Create a launcher script to capture errors
+        $launcher = $BOT_DIR . '/.manager_launcher.sh';
+        $script  = "#!/bin/bash\n";
+        $script .= "cd " . escapeshellarg($BOT_DIR) . "\n";
+        $script .= "python3 auto_manager.py\n";
+        $script .= "echo 'Auto-Manager Exited.'\nread\n";
+        file_put_contents($launcher, $script);
+        chmod($launcher, 0755);
+        
+        $tmuxCmd = "tmux new-session -d -s " . escapeshellarg($MGR_TMUX) . " bash " . escapeshellarg($launcher) . " 2>&1";
         exec($tmuxCmd, $out, $ret);
         sleep(1);
         echo json_encode(['success'=>true]);
