@@ -275,6 +275,7 @@ def main() -> int:
     ap = argparse.ArgumentParser(description="Market Daemon — continuous volatility monitor")
     ap.add_argument("--app-id", type=int, default=1089)
     ap.add_argument("--interval", type=int, default=30, help="Seconds between snapshot writes (default 30)")
+    ap.add_argument("--hours", type=float, default=1.0, help="Lookback hours (ignored by daemon)")
     ap.add_argument("--symbols", nargs="+", default=None)
     ap.add_argument("--debug", action="store_true")
     args = ap.parse_args()

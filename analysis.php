@@ -281,6 +281,7 @@ if (isset($_GET['api'])) {
         $body = json_decode(file_get_contents('php://input'), true) ?? [];
         $interval = intval($body['interval'] ?? 30);
         $appId    = intval($body['app_id']   ?? 1089);
+        $hours    = isset($body['hours']) ? floatval($body['hours']) : 1.0;
         if ($interval < 5) $interval = 5;
         if ($interval > 300) $interval = 300;
         $DAEMON_TMUX = 'market_daemon';
@@ -292,7 +293,7 @@ if (isset($_GET['api'])) {
             exec("tmux kill-session -t " . escapeshellarg($DAEMON_TMUX) . " 2>&1");
             sleep(1);
         }
-        $cmd = sprintf("cd %s && python3 market_daemon.py --app-id %d --interval %d", escapeshellarg($BOT_DIR), $appId, $interval);
+        $cmd = sprintf("cd %s && python3 market_daemon.py --app-id %d --interval %d --hours %.4f", escapeshellarg($BOT_DIR), $appId, $interval, $hours);
         $tmuxCmd = "tmux new-session -d -s " . escapeshellarg($DAEMON_TMUX) . " " . escapeshellarg($cmd) . " 2>&1";
         exec($tmuxCmd, $out, $ret);
         sleep(2);
@@ -1158,7 +1159,7 @@ canvas{width:100%!important}
       <div class="daemon-box">
         <h3>🔌 Background Market Daemon</h3>
         <div class="sub">Subscribes to live tick streams and continuously updates analysis — instant results without re-fetching history. Runs independently even when the browser is closed.</div>
-        <div class="form-grid" style="max-width:480px;margin-bottom:14px">
+        <div class="form-grid" style="max-width:700px;margin-bottom:14px;grid-template-columns:1fr 1fr 1fr">
           <div class="form-group">
             <label>Snapshot Interval</label>
             <select id="fDaemonInterval">
@@ -1166,6 +1167,24 @@ canvas{width:100%!important}
               <option value="15">Every 15 sec</option>
               <option value="30" selected>Every 30 sec</option>
               <option value="60">Every 1 min</option>
+            </select>
+          </div>
+          <div class="form-group">
+            <label>Lookback Period</label>
+            <select id="fDaemonHours">
+              <option value="0.0167">1 min</option>
+              <option value="0.0333">2 min</option>
+              <option value="0.0833">5 min</option>
+              <option value="0.1667">10 min</option>
+              <option value="0.25">15 min</option>
+              <option value="0.3333">20 min</option>
+              <option value="0.5">30 min</option>
+              <option value="0.75">45 min</option>
+              <option value="1" selected>1 hour</option>
+              <option value="2">2 hours</option>
+              <option value="4">4 hours</option>
+              <option value="12">12 hours</option>
+              <option value="24">24 hours</option>
             </select>
           </div>
           <div class="form-group">
@@ -1200,11 +1219,19 @@ canvas{width:100%!important}
           <div class="form-group">
             <label>Lookback (manual scan)</label>
             <select id="fScanHours">
+              <option value="0.0167">1 min</option>
+              <option value="0.0333">2 min</option>
+              <option value="0.0833">5 min</option>
+              <option value="0.1667">10 min</option>
               <option value="0.25">15 min</option>
+              <option value="0.3333">20 min</option>
               <option value="0.5">30 min</option>
+              <option value="0.75">45 min</option>
               <option value="1" selected>1 hour</option>
               <option value="2">2 hours</option>
               <option value="4">4 hours</option>
+              <option value="12">12 hours</option>
+              <option value="24">24 hours</option>
             </select>
           </div>
           <div class="form-group">
@@ -1413,14 +1440,17 @@ async function init() {
   setInterval(pollBgStatus, 8000); // background polling every 8s
 }
 
-async function loadSessions(append = false) {
+async function loadSessions(append = false, silent = false) {
   if (loadingSessions) return;
   loadingSessions = true;
   try {
-    if (!append) {
+    if (!append && !silent) {
       sessionsOffset = 0;
       allSessionsLoaded = false;
       document.getElementById('sessionGrid').innerHTML = '<div style="padding:20px;color:var(--text3);display:flex;align-items:center"><div class="spinner" style="margin-right:8px;border-width:2px;width:14px;height:14px"></div> Loading sessions...</div>';
+    } else if (!append && silent) {
+      sessionsOffset = 0;
+      allSessionsLoaded = false;
     }
     
     const newSessions = await apiFetch(`?api=sessions&offset=${sessionsOffset}&limit=${sessionsLimit}`);
@@ -1432,18 +1462,18 @@ async function loadSessions(append = false) {
     
     sessionsOffset += newSessions.length;
     
-    renderSessionGrid(append, newSessions);
+    renderSessionGrid(append, newSessions, silent);
     document.getElementById('sessCount').textContent = sessions.length;
     
     if (!append && activeFile && sessions.find(s => s.file === activeFile)) {
-      await loadSession(activeFile, false);
+      await loadSession(activeFile, false, silent);
     }
   } catch(e) { console.error('Sessions:', e); }
   loadingSessions = false;
 }
 
 function refreshAll() {
-  loadSessions(false);
+  loadSessions(false, true);
   pollBgStatus();
 }
 
@@ -1453,7 +1483,7 @@ document.getElementById('autoRefresh').addEventListener('change', function() {
 });
 
 // ─── SESSION GRID ─────────────────────────────────────────────────────────────
-function renderSessionGrid(append = false, newSessions = null) {
+function renderSessionGrid(append = false, newSessions = null, silent = false) {
   const grid = document.getElementById('sessionGrid');
   if (!sessions.length) {
     grid.innerHTML = '<div style="color:var(--text3);padding:20px;font-size:.85rem">No sessions found in data/ folder.</div>';
@@ -1484,7 +1514,9 @@ function renderSessionGrid(append = false, newSessions = null) {
   if (append) {
     grid.insertAdjacentHTML('beforeend', html);
   } else {
+    const scrollLeft = grid.scrollLeft;
     grid.innerHTML = html;
+    if (silent) grid.scrollLeft = scrollLeft;
   }
 }
 
@@ -1520,7 +1552,7 @@ async function loadSession(file, scroll=true) {
 }
 
 // ─── RENDER DASHBOARD ─────────────────────────────────────────────────────────
-function renderDashboard() {
+function renderDashboard(silent = false) {
   if (!activeData) return;
   const d = activeData, sess = d.session||{}, sum = d.summary||{};
   const trades = d.trades||[], curve = d.equity_curve||[];
@@ -1554,8 +1586,23 @@ function renderDashboard() {
     if (dd > maxDD) maxDD = dd;
   }
 
-  const avgW = tradeWins.length ? tradeWins.reduce((a,t)=>a+t.profit,0)/tradeWins.length : 0;
-  const avgL = tradeLosses.length ? tradeLosses.reduce((a,t)=>a+Math.abs(t.profit),0)/tradeLosses.length : 0;
+  let maxWinStreak = 0, maxWinPnl = 0, maxLossStreak = 0, maxLossPnl = 0;
+  if (trades.length > 0) {
+    let curType = trades[0].result, curLen = 1, curPnl = trades[0].profit;
+    for (let i = 1; i <= trades.length; i++) {
+      if (i < trades.length && trades[i].result === curType) {
+        curLen++; curPnl += trades[i].profit;
+      } else {
+        if (curType === 'win') {
+          if (curLen > maxWinStreak || (curLen === maxWinStreak && curPnl > maxWinPnl)) { maxWinStreak = curLen; maxWinPnl = curPnl; }
+        } else {
+          if (curLen > maxLossStreak || (curLen === maxLossStreak && curPnl < maxLossPnl)) { maxLossStreak = curLen; maxLossPnl = curPnl; }
+        }
+        if (i < trades.length) { curType = trades[i].result; curLen = 1; curPnl = trades[i].profit; }
+      }
+    }
+  }
+
   const eqChange = curEq - initEq;
   const pnlColor = netPnl>=0?'var(--green-light)':'var(--red-light)';
   const eqColor = eqChange>=0?'var(--green-light)':'var(--red-light)';
@@ -1592,23 +1639,27 @@ function renderDashboard() {
       <div class="icon">⚠️</div>
     </div>
     <div class="stat-card purple">
-      <div class="label">Avg Win / Loss</div>
-      <div class="value" style="font-size:1rem">$${avgW.toFixed(2)} / $${avgL.toFixed(2)}</div>
-      <div class="sub">Edge: ${avgL>0?(avgW/avgL).toFixed(2):'∞'}×</div>
-      <div class="icon">⚖️</div>
+      <div class="label">Best / Worst Streak</div>
+      <div class="value" style="font-size:1rem">${maxWinStreak}W / ${maxLossStreak}L</div>
+      <div class="sub"><span style="color:var(--green-light)">+$${maxWinPnl.toFixed(2)}</span> <span style="color:var(--text4)">|</span> <span style="color:var(--red-light)">-$${Math.abs(maxLossPnl).toFixed(2)}</span></div>
+      <div class="icon">⚡</div>
     </div>
   `;
 
   // Chart sub text
   document.getElementById('eqChartSub').textContent = `Initial: $${initEq.toFixed(2)} → Current: $${curEq.toFixed(2)}`;
 
-  renderCharts(trades, curve, initEq);
-  renderStreaks(trades);
-  renderSymbolBreakdown(trades);
+  renderCharts(trades, curve, initEq, silent);
+  if (!silent) renderStreaks(trades);
+  if (!silent) renderSymbolBreakdown(trades);
 
   // Trade log — compute cum P&L live from trades
   document.getElementById('tradeCount').textContent = `${trades.length} trades`;
   let cum = 0;
+  
+  const tradeWrap = document.getElementById('tradeBody').parentElement.parentElement;
+  const oldScroll = tradeWrap.scrollTop;
+  
   document.getElementById('tradeBody').innerHTML = trades.map(t => {
     cum += t.profit;
     const win = t.result==='win';
@@ -1666,8 +1717,8 @@ function baseOpts(height) {
   };
 }
 
-function renderCharts(trades, curve, initEq) {
-  destroyCharts();
+function renderCharts(trades, curve, initEq, silent = false) {
+  if (!silent) destroyCharts();
   if (!trades.length) return;
 
   // Use equity_after from trades directly — most reliable source
@@ -1677,78 +1728,90 @@ function renderCharts(trades, curve, initEq) {
   const pnlVals = trades.map(t => { cum += t.profit; return cum; });
   const pointColors = trades.map(t => t.result==='win' ? '#38a169' : '#e53e3e');
 
-  // Equity chart — combined equity + PnL on dual axis
-  const eqCtx = document.getElementById('equityChart').getContext('2d');
-  const eqGrad = eqCtx.createLinearGradient(0,0,0,200);
-  eqGrad.addColorStop(0,'rgba(49,130,206,0.15)');
-  eqGrad.addColorStop(1,'rgba(49,130,206,0.01)');
   const pnlFinal = pnlVals[pnlVals.length-1] ?? 0;
-  const pnlGrad = eqCtx.createLinearGradient(0,0,0,200);
-  pnlGrad.addColorStop(0, pnlFinal>=0?'rgba(56,161,105,0.18)':'rgba(229,62,62,0.15)');
-  pnlGrad.addColorStop(1,'transparent');
 
-  charts.eq = new Chart(eqCtx, {
-    type: 'line',
-    data: {
-      labels,
-      datasets: [
-        {
-          label: 'Equity',
-          data: eqVals,
-          borderColor: '#3182ce',
-          backgroundColor: eqGrad,
-          fill: true,
-          tension: 0.35,
-          pointRadius: trades.length > 80 ? 0 : 2,
-          borderWidth: 2,
-          yAxisID: 'y',
-        },
-        {
-          label: 'Cum P&L',
-          data: pnlVals,
-          borderColor: pnlFinal>=0?'#38a169':'#e53e3e',
-          backgroundColor: pnlGrad,
-          fill: true,
-          tension: 0.35,
-          pointRadius: 0,
-          borderWidth: 1.5,
-          borderDash: [4,3],
-          yAxisID: 'y2',
-        }
-      ]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      interaction: { mode: 'index', intersect: false },
-      animation: { duration: 400 },
-      plugins: {
-        legend: { display: true, position: 'top', labels: { color: TICK_COLOR, font: { family: CHART_FONT, size: 11 }, boxWidth: 12, padding: 12 } },
-        tooltip: { backgroundColor:'#1a202c',titleColor:'#e2e8f0',bodyColor:'#a0aec0',borderColor:'#2d3748',borderWidth:1,titleFont:{family:'IBM Plex Mono',size:11},bodyFont:{family:'IBM Plex Mono',size:11},padding:10 }
+  if (silent && charts.eq) {
+    charts.eq.data.labels = labels;
+    charts.eq.data.datasets[0].data = eqVals;
+    charts.eq.data.datasets[1].data = pnlVals;
+    charts.eq.update('none');
+  } else {
+    // Equity chart — combined equity + PnL on dual axis
+    const eqCtx = document.getElementById('equityChart').getContext('2d');
+    const eqGrad = eqCtx.createLinearGradient(0,0,0,200);
+    eqGrad.addColorStop(0,'rgba(49,130,206,0.15)');
+    eqGrad.addColorStop(1,'rgba(49,130,206,0.01)');
+    const pnlGrad = eqCtx.createLinearGradient(0,0,0,200);
+    pnlGrad.addColorStop(0, pnlFinal>=0?'rgba(56,161,105,0.18)':'rgba(229,62,62,0.15)');
+    pnlGrad.addColorStop(1,'transparent');
+
+    charts.eq = new Chart(eqCtx, {
+      type: 'line',
+      data: {
+        labels,
+        datasets: [
+          {
+            label: 'Equity',
+            data: eqVals,
+            borderColor: '#3182ce',
+            backgroundColor: eqGrad,
+            fill: true,
+            tension: 0.35,
+            pointRadius: trades.length > 80 ? 0 : 2,
+            borderWidth: 2,
+            yAxisID: 'y',
+          },
+          {
+            label: 'Cum P&L',
+            data: pnlVals,
+            borderColor: pnlFinal>=0?'#38a169':'#e53e3e',
+            backgroundColor: pnlGrad,
+            fill: true,
+            tension: 0.35,
+            pointRadius: 0,
+            borderWidth: 1.5,
+            borderDash: [4,3],
+            yAxisID: 'y2',
+          }
+        ]
       },
-      scales: {
-        x: { grid:{color:GRID_COLOR,drawBorder:false}, ticks:{color:TICK_COLOR,font:{family:CHART_FONT,size:10},maxTicksLimit:10} },
-        y: { position:'left', grid:{color:GRID_COLOR,drawBorder:false}, ticks:{color:'#3182ce',font:{family:CHART_FONT,size:10},callback:v=>'$'+v.toFixed(2)} },
-        y2: { position:'right', grid:{display:false}, ticks:{color:pnlFinal>=0?'#38a169':'#e53e3e',font:{family:CHART_FONT,size:10},callback:v=>'$'+v.toFixed(2)} }
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        interaction: { mode: 'index', intersect: false },
+        animation: { duration: 400 },
+        plugins: {
+          legend: { display: true, position: 'top', labels: { color: TICK_COLOR, font: { family: CHART_FONT, size: 11 }, boxWidth: 12, padding: 12 } },
+          tooltip: { backgroundColor:'#1a202c',titleColor:'#e2e8f0',bodyColor:'#a0aec0',borderColor:'#2d3748',borderWidth:1,titleFont:{family:'IBM Plex Mono',size:11},bodyFont:{family:'IBM Plex Mono',size:11},padding:10 }
+        },
+        scales: {
+          x: { grid:{color:GRID_COLOR,drawBorder:false}, ticks:{color:TICK_COLOR,font:{family:CHART_FONT,size:10},maxTicksLimit:10} },
+          y: { position:'left', grid:{color:GRID_COLOR,drawBorder:false}, ticks:{color:'#3182ce',font:{family:CHART_FONT,size:10},callback:v=>'$'+v.toFixed(2)} },
+          y2: { position:'right', grid:{display:false}, ticks:{color:pnlFinal>=0?'#38a169':'#e53e3e',font:{family:CHART_FONT,size:10},callback:v=>'$'+v.toFixed(2)} }
+        }
       }
-    }
-  });
+    });
+  }
 
   // Win/Loss donut
   const wins = trades.filter(t=>t.result==='win').length;
-  charts.wl = new Chart(document.getElementById('wlChart').getContext('2d'), {
-    type: 'doughnut',
-    data: {
-      labels: ['Wins','Losses'],
-      datasets: [{ data:[wins,trades.length-wins], backgroundColor:['rgba(56,161,105,0.8)','rgba(229,62,62,0.8)'], borderColor:['#38a169','#e53e3e'], borderWidth:2 }]
-    },
-    options: {
-      responsive: true,
-      maintainAspectRatio: false,
-      cutout: '70%',
-      animation: { duration: 600 },
-      plugins: {
-        legend: { position: 'bottom', labels: { color: TICK_COLOR, font: { family: CHART_FONT, size: 12 }, padding: 16 } },
+  if (silent && charts.wl) {
+    charts.wl.data.datasets[0].data = [wins, trades.length - wins];
+    charts.wl.update('none');
+  } else {
+    charts.wl = new Chart(document.getElementById('wlChart').getContext('2d'), {
+      type: 'doughnut',
+      data: {
+        labels: ['Wins','Losses'],
+        datasets: [{ data:[wins,trades.length-wins], backgroundColor:['rgba(56,161,105,0.8)','rgba(229,62,62,0.8)'], borderColor:['#38a169','#e53e3e'], borderWidth:2 }]
+      },
+      options: {
+        responsive: true,
+        maintainAspectRatio: false,
+        cutout: '70%',
+        animation: { duration: 600 },
+        plugins: {
+          legend: { position: 'bottom', labels: { color: TICK_COLOR, font: { family: CHART_FONT, size: 12 }, padding: 16 } },
         tooltip: { callbacks: { label: ctx => ` ${ctx.label}: ${ctx.raw} (${((ctx.raw/trades.length)*100).toFixed(1)}%)` } }
       }
     }
@@ -2180,7 +2243,7 @@ async function startDaemon() {
   const btn=document.getElementById('daemonStartBtn');
   btn.disabled=true; btn.innerHTML='<div class="spinner" style="width:14px;height:14px;border-width:2px"></div> Starting...';
   try {
-    await fetch('?api=daemon_start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:parseInt(document.getElementById('fDaemonInterval').value),app_id:parseInt(document.getElementById('fDaemonAppId').value)})});
+    await fetch('?api=daemon_start', {method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({interval:parseInt(document.getElementById('fDaemonInterval').value),app_id:parseInt(document.getElementById('fDaemonAppId').value),hours:parseFloat(document.getElementById('fDaemonHours').value)})});
   } catch(e) {}
   setTimeout(refreshDaemonStatus, 1500);
 }
