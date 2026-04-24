@@ -510,6 +510,117 @@ if (isset($_GET['api'])) {
         exit;
     }
 
+    // ── Session delete ──────────────────────────────────────────────────────
+    if ($_GET['api'] === 'session_delete' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $file = basename($body['file'] ?? '');
+        if (!$file || !str_ends_with($file, '.json')) {
+            echo json_encode(['success'=>false,'error'=>'Invalid file']);
+            exit;
+        }
+        $path = $DATA_DIR . '/' . $file;
+        if (!file_exists($path)) {
+            echo json_encode(['success'=>false,'error'=>'File not found']);
+            exit;
+        }
+        // Safety: refuse to delete benchmark state/config files
+        if (in_array($file, ['benchmark_state.json','benchmark_config.json','manager_state.json','manager_config.json','market_scan.json'])) {
+            echo json_encode(['success'=>false,'error'=>'Protected file']);
+            exit;
+        }
+        unlink($path);
+        echo json_encode(['success'=>true]);
+        exit;
+    }
+
+    // ── Benchmark start ─────────────────────────────────────────────────────
+    if ($_GET['api'] === 'benchmark_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $BENCH_TMUX = 'bbot-benchmark';
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        // Persist config so benchmark.py can read it
+        file_put_contents($DATA_DIR . '/benchmark_config.json', json_encode($body, JSON_PRETTY_PRINT));
+        // Kill any existing benchmark
+        exec("tmux kill-session -t =" . escapeshellarg($BENCH_TMUX) . " 2>&1");
+        // Delete stale state
+        @unlink($DATA_DIR . '/benchmark_state.json');
+        // Launch orchestrator
+        $out=[]; $ret=-1;
+        exec("tmux new-session -d -s " . escapeshellarg($BENCH_TMUX) . " 'python3 benchmark.py' 2>&1", $out, $ret);
+        echo json_encode(['success'=>$ret===0,'ret'=>$ret,'out'=>implode("\n",$out)]);
+        exit;
+    }
+
+    // ── Benchmark status ────────────────────────────────────────────────────
+    if ($_GET['api'] === 'benchmark_status') {
+        $BENCH_TMUX = 'bbot-benchmark';
+        $chk=[]; $chkCode=-1;
+        exec("tmux has-session -t =" . escapeshellarg($BENCH_TMUX) . " 2>&1", $chk, $chkCode);
+        $orchestratorRunning = ($chkCode === 0);
+
+        $state = null;
+        $stateFile = $DATA_DIR . '/benchmark_state.json';
+        if (file_exists($stateFile)) {
+            $state = json_decode(file_get_contents($stateFile), true);
+        }
+
+        // Inject live runner data from each session file so UI always gets fresh stats
+        if ($state && isset($state['runners'])) {
+            foreach ($state['runners'] as $algo => &$r) {
+                $sf = $r['session_file'] ?? '';
+                if ($sf && file_exists($sf)) {
+                    $d = json_decode(file_get_contents($sf), true) ?? [];
+                    $sum = $d['summary'] ?? [];
+                    $sess = $d['session'] ?? [];
+                    if ($sum) {
+                        $r['trades']   = $sum['trade_count'] ?? $r['trades'];
+                        $r['wins']     = $sum['wins']        ?? $r['wins'];
+                        $r['losses']   = $sum['losses']      ?? $r['losses'];
+                        $r['net_pnl']  = $sum['net_pnl']     ?? $r['net_pnl'];
+                        $r['win_rate'] = $sum['win_rate']     ?? $r['win_rate'];
+                    }
+                    if ($sess) {
+                        $r['initial_equity']  = $sess['initial_equity']  ?? $r['initial_equity'];
+                        $r['current_equity']  = $sess['current_equity']  ?? $r['current_equity'];
+                    }
+                }
+            }
+            unset($r);
+        }
+
+        echo json_encode(['orchestrator_running'=>$orchestratorRunning, 'state'=>$state]);
+        exit;
+    }
+
+    // ── Benchmark stop ──────────────────────────────────────────────────────
+    if ($_GET['api'] === 'benchmark_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $BENCH_TMUX = 'bbot-benchmark';
+        // Kill orchestrator
+        exec("tmux kill-session -t =" . escapeshellarg($BENCH_TMUX) . " 2>&1");
+        // Kill each per-algo runner session
+        $stateFile = $DATA_DIR . '/benchmark_state.json';
+        if (file_exists($stateFile)) {
+            $state = json_decode(file_get_contents($stateFile), true) ?? [];
+            foreach ($state['runners'] ?? [] as $r) {
+                $ts = $r['tmux_session'] ?? '';
+                if ($ts) exec("tmux kill-session -t =" . escapeshellarg($ts) . " 2>&1");
+            }
+            // Mark state as stopped
+            $state['status']       = 'stopped';
+            $state['completed_at'] = time();
+            foreach ($state['runners'] as &$r2) {
+                if (in_array($r2['status'], ['running','starting'])) {
+                    $r2['status']     = 'stopped';
+                    $r2['end_reason'] = 'manual_stop';
+                    $r2['ended_at']   = time();
+                }
+            }
+            unset($r2);
+            file_put_contents($stateFile, json_encode($state, JSON_PRETTY_PRINT));
+        }
+        echo json_encode(['success'=>true]);
+        exit;
+    }
+
     http_response_code(400);
     echo json_encode(['error'=>'Unknown endpoint']);
     exit;
@@ -887,6 +998,40 @@ canvas{width:100%!important}
 .filter-check-label:hover{border-color:var(--blue-light);color:var(--blue-light)}
 .filter-check-label input{accent-color:var(--blue-light)}
 
+/* ── BENCHMARK TAB ── */
+.bench-runner-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(260px,1fr));gap:14px;margin-bottom:20px}
+.bench-runner-card{background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:16px;box-shadow:var(--shadow);transition:border-color .2s}
+.bench-runner-card.running{border-color:var(--blue-light)}
+.bench-runner-card.done-profit{border-color:var(--green-light);background:var(--green-bg)}
+.bench-runner-card.done-loss{border-color:var(--red-light);background:var(--red-bg)}
+.bench-runner-card.done-stopped{border-color:var(--border2)}
+.brc-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:10px}
+.brc-algo{font-family:var(--mono);font-size:.92rem;font-weight:700;color:var(--text)}
+.brc-badge{font-size:.62rem;font-weight:700;padding:3px 9px;border-radius:20px;text-transform:uppercase}
+.brc-badge.running{background:var(--blue-bg);color:var(--blue-light);border:1px solid var(--blue-border)}
+.brc-badge.profit{background:var(--green-bg);color:var(--green-light);border:1px solid var(--green-border)}
+.brc-badge.loss{background:var(--red-bg);color:var(--red-light);border:1px solid var(--red-border)}
+.brc-badge.stopped{background:var(--surface3);color:var(--text3);border:1px solid var(--border2)}
+.brc-badge.starting{background:var(--amber-bg);color:var(--amber);border:1px solid var(--amber-border)}
+.brc-stats{display:grid;grid-template-columns:1fr 1fr;gap:6px}
+.brc-stat .k{font-size:.6rem;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);margin-bottom:2px}
+.brc-stat .v{font-family:var(--mono);font-size:.82rem;font-weight:600;color:var(--text)}
+.brc-pnl-pos{color:var(--green-light)}
+.brc-pnl-neg{color:var(--red-light)}
+.bench-results-table{width:100%;border-collapse:collapse;font-size:.8rem}
+.bench-results-table th{text-align:left;padding:9px 14px;font-size:.65rem;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);border-bottom:2px solid var(--border);font-weight:700;background:var(--surface2)}
+.bench-results-table td{padding:9px 14px;border-bottom:1px solid var(--border);font-family:var(--mono)}
+.bench-results-table tr.rank-1 td:first-child{font-weight:700;color:var(--green-light)}
+.bench-results-table tr:hover td{background:var(--surface2)}
+
+/* ── CONFIRM MODAL ── */
+.modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal-box{background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:28px 28px 22px;max-width:420px;width:90%;box-shadow:var(--shadow-lg)}
+.modal-box h3{font-size:1rem;font-weight:700;color:var(--text);margin-bottom:8px}
+.modal-box p{font-size:.83rem;color:var(--text2);line-height:1.55;margin-bottom:20px}
+.modal-actions{display:flex;gap:10px;justify-content:flex-end}
+
 /* Responsive */
 .mobile-nav-btn { display: none; background: transparent; border: none; color: var(--text); font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
 .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; }
@@ -935,6 +1080,11 @@ canvas{width:100%!important}
   <div class="sidebar-item" data-tab="scanner" onclick="switchTab('scanner',this)">
     <span class="si-icon">🔍</span> Market Scanner
     <span class="si-dot off" id="sidebarDaemonDot"></span>
+  </div>
+  <div class="sidebar-section">Tournament</div>
+  <div class="sidebar-item" data-tab="benchmark" onclick="switchTab('benchmark',this)">
+    <span class="si-icon">⚔️</span> Benchmark
+    <span class="si-dot off" id="sidebarBenchDot"></span>
   </div>
   <div class="sidebar-footer">
     <div class="sidebar-footer-text">
@@ -1533,8 +1683,168 @@ canvas{width:100%!important}
 
     </div>
 
+    <!-- ═══════════════ BENCHMARK TAB ═══════════════ -->
+    <div class="tab-content" id="tab-benchmark">
+      <div class="page-header">
+        <h2>Algorithm Benchmark</h2>
+        <p>Run all selected algorithms simultaneously with the same capital and compare who performs best under identical market conditions</p>
+      </div>
+
+      <!-- Control panel -->
+      <div class="card" style="margin-bottom:16px">
+        <div class="card-header">
+          <h3>⚙️ Benchmark Settings</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <div class="status-dot off" id="benchDot"></div>
+            <span style="font-size:.77rem;color:var(--text3)" id="benchStatusLabel">Not running</span>
+          </div>
+        </div>
+        <div class="card-body" style="padding:16px">
+          <div class="form-grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:12px;margin-bottom:16px">
+            <div class="form-group">
+              <label>Capital per Algo ($)</label>
+              <input type="number" id="bCapital" value="2500" min="10" step="10">
+              <div class="hint">Virtual cap per bot from demo wallet</div>
+            </div>
+            <div class="form-group">
+              <label>Loss Limit ($)</label>
+              <input type="number" id="bLossLimit" value="500" min="1" step="10">
+              <div class="hint">Bot stops after this net loss</div>
+            </div>
+            <div class="form-group">
+              <label>Profit Target ($)</label>
+              <input type="number" id="bProfitTarget" value="250" min="1" step="10">
+              <div class="hint">Bot stops after reaching this profit</div>
+            </div>
+            <div class="form-group">
+              <label>Base Stake ($)</label>
+              <input type="number" id="bBaseStake" value="1.00" min="0.35" step="0.05">
+            </div>
+            <div class="form-group">
+              <label>Martingale</label>
+              <input type="number" id="bMartingale" value="2.0" min="1" step="0.1">
+            </div>
+            <div class="form-group">
+              <label>Max Stake ($)</label>
+              <input type="number" id="bMaxStake" value="50" min="1" step="1">
+            </div>
+            <div class="form-group">
+              <label>Score Threshold</label>
+              <input type="number" id="bThreshold" value="0.60" min="0.5" max="0.99" step="0.01">
+            </div>
+            <div class="form-group">
+              <label>Trade Strategy</label>
+              <select id="bTradeStrategy">
+                <option value="even_odd" selected>even_odd</option>
+                <option value="rise_fall_roll">rise_fall_roll</option>
+                <option value="rise_fall_zigzag">rise_fall_zigzag</option>
+                <option value="higher_lower_roll">higher_lower_roll</option>
+                <option value="higher_lower_zigzag">higher_lower_zigzag</option>
+                <option value="over_under_roll">over_under_roll</option>
+                <option value="touch_notouch_zigzag">touch_notouch_zigzag</option>
+              </select>
+            </div>
+            <div class="form-group">
+              <label>Account Mode</label>
+              <div class="mode-group">
+                <button class="mode-btn active-demo" id="bModeDemo" onclick="setBenchMode('demo')">Demo</button>
+                <button class="mode-btn" id="bModeReal" onclick="setBenchMode('real')">Real</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- Algorithms to benchmark -->
+          <div style="margin-bottom:14px">
+            <label style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);display:block;margin-bottom:8px">Algorithms to Race</label>
+            <div style="display:flex;flex-wrap:wrap;gap:8px" id="benchAlgoChecks">
+              <?php foreach(['ensemble','alphabloom','pulse','novaburst','adaptive'] as $a): ?>
+              <label style="display:flex;align-items:center;gap:5px;padding:6px 14px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.76rem;font-weight:600;color:var(--text2);transition:all .12s">
+                <input type="checkbox" class="bench-algo-chk" value="<?= $a ?>" checked style="accent-color:var(--blue-light)">
+                <?= $a ?>
+              </label>
+              <?php endforeach; ?>
+            </div>
+          </div>
+
+          <!-- Symbols -->
+          <div style="margin-bottom:14px">
+            <label style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);display:block;margin-bottom:8px">Symbols (all use same set)</label>
+            <div style="display:flex;flex-wrap:wrap;gap:8px" id="benchSymChecks"></div>
+            <div style="margin-top:6px;display:flex;gap:8px">
+              <button class="btn btn-ghost btn-sm" onclick="benchSymAll(true)">All</button>
+              <button class="btn btn-ghost btn-sm" onclick="benchSymAll(false)">None</button>
+            </div>
+          </div>
+
+          <!-- Token (read from bot control if available) -->
+          <div class="form-group" style="max-width:380px;margin-bottom:16px">
+            <label>API Token</label>
+            <input type="text" id="bToken" placeholder="Paste your Deriv API token">
+            <div class="hint">Same token used in Bot Control</div>
+          </div>
+
+          <div style="display:flex;gap:10px;flex-wrap:wrap">
+            <button class="btn btn-primary" id="benchStartBtn" onclick="startBenchmark()">▶ Start Race</button>
+            <button class="btn btn-danger" id="benchStopBtn" onclick="stopBenchmark()" style="display:none">⏹ Stop All</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Live runner cards -->
+      <div id="benchRunnersSection" style="display:none">
+        <div class="section-head" style="margin-bottom:10px">
+          <h3 style="font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text3)">Live Runners</h3>
+          <span style="font-size:.72rem;color:var(--text3)" id="benchTimer">—</span>
+        </div>
+        <div class="bench-runner-grid" id="benchRunnerGrid"></div>
+      </div>
+
+      <!-- Results table -->
+      <div id="benchResultsSection" style="display:none">
+        <div class="card">
+          <div class="card-header">
+            <h3>📊 Final Results</h3>
+            <button class="btn btn-ghost btn-sm" onclick="clearBenchResults()">✕ Clear</button>
+          </div>
+          <div class="card-body" style="padding:0;overflow-x:auto">
+            <table class="bench-results-table" id="benchResultsTable">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Algorithm</th>
+                  <th>Result</th>
+                  <th>Net P&L</th>
+                  <th>Trades</th>
+                  <th>Win Rate</th>
+                  <th>W / L</th>
+                  <th>Max Win Streak</th>
+                  <th>Max Loss Streak</th>
+                  <th>Duration</th>
+                  <th>End Reason</th>
+                </tr>
+              </thead>
+              <tbody id="benchResultsBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+
+    </div>
+
   </div><!-- /content -->
 </div><!-- /main -->
+
+<!-- ── CONFIRM DELETE MODAL ── -->
+<div class="modal-overlay" id="deleteModal">
+  <div class="modal-box">
+    <h3>Delete Session?</h3>
+    <p id="deleteModalMsg">This action cannot be undone. The session file will be permanently deleted.</p>
+    <div class="modal-actions">
+      <button class="btn btn-ghost" onclick="closeDeleteModal()">Cancel</button>
+      <button class="btn btn-danger" id="deleteModalConfirm" onclick="confirmDeleteSession()">Delete</button>
+    </div>
+  </div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
 <script>
@@ -1545,7 +1855,7 @@ let currentMode = 'demo';
 let logSSE = null; // SSE connection for bot logs
 
 // ─── TABS ─────────────────────────────────────────────────────────────────────
-const TAB_TITLES = { analytics: 'Session Analytics', summary: 'Performance Summary', control: 'Bot Control', training: 'ML Training', scanner: 'Market Scanner' };
+const TAB_TITLES = { analytics: 'Session Analytics', summary: 'Performance Summary', control: 'Bot Control', training: 'ML Training', scanner: 'Market Scanner', benchmark: 'Algorithm Benchmark' };
 
 function toggleSidebar() {
   document.querySelector('.sidebar').classList.toggle('open');
@@ -1563,6 +1873,24 @@ function switchTab(tab, el) {
   else { stopLogSSE(); }
   if (tab === 'training') { refreshMlStatus(); loadMlFiles(); }
   if (tab === 'summary') { loadSummary(); }
+  if (tab === 'benchmark') {
+    syncBenchToken();
+    apiFetch('?api=benchmark_status').then(d => {
+      if (!d.state) return;
+      const s = d.state.status;
+      renderBenchRunners(d.state);
+      document.getElementById('benchRunnersSection').style.display = '';
+      if (s === 'running') {
+        document.getElementById('benchStopBtn').style.display = '';
+        updateBenchSidebarDot(true);
+        if (!benchPollTimer) startBenchPoll();
+      }
+      if (s === 'completed' || s === 'stopped') {
+        renderBenchResults(d.state);
+        document.getElementById('benchResultsSection').style.display = '';
+      }
+    }).catch(() => {});
+  }
 }
 
 // ─── SSE BOT LOGS ─────────────────────────────────────────────────────────────
@@ -1873,8 +2201,13 @@ function renderSessionGrid(append = false, newSessions = null, silent = false) {
     const modeBadge = s.account_mode === 'live'
       ? '<span class="sc-mode live">Live</span>'
       : '<span class="sc-mode demo">Demo</span>';
+    const deleteBtn = s.is_live ? '' :
+      `<button class="btn btn-ghost btn-sm" title="Delete session"
+          style="position:absolute;top:7px;right:7px;padding:2px 7px;font-size:.7rem;opacity:.55;z-index:5"
+          onclick="event.stopPropagation();openDeleteModal('${s.file}')">✕</button>`;
     return `<div class="session-card ${s.is_live?'live-card':''} ${activeFile===s.file?'active-card':''}"
-         data-file="${s.file}" onclick="loadSession('${s.file}')">
+         data-file="${s.file}" onclick="loadSession('${s.file}')" style="position:relative">
+      ${deleteBtn}
       ${modeBadge}
       <div class="sc-id">${s.file.replace('.json','')}</div>
       <div class="sc-date">${fmtTs(s.started_at)}</div>
@@ -2835,8 +3168,300 @@ function computeDuration(start, end) {
   return Math.floor(diff/3600)+'h '+Math.floor((diff%3600)/60)+'m';
 }
 
+// ─── SESSION DELETE ───────────────────────────────────────────────────────────
+let deleteTargetFile = null;
+
+function openDeleteModal(file) {
+  deleteTargetFile = file;
+  document.getElementById('deleteModalMsg').textContent =
+    `Permanently delete "${file}"? This cannot be undone.`;
+  document.getElementById('deleteModal').classList.add('open');
+}
+function closeDeleteModal() {
+  deleteTargetFile = null;
+  document.getElementById('deleteModal').classList.remove('open');
+}
+async function confirmDeleteSession() {
+  if (!deleteTargetFile) return;
+  const btn = document.getElementById('deleteModalConfirm');
+  btn.disabled = true; btn.textContent = 'Deleting…';
+  try {
+    const res = await apiPost('?api=session_delete', { file: deleteTargetFile });
+    if (res.success) {
+      // Remove from local array and re-render without a full reload
+      sessions = sessions.filter(s => s.file !== deleteTargetFile);
+      if (activeFile === deleteTargetFile) {
+        activeFile = null; activeData = null;
+        document.getElementById('dashboard').style.display = 'none';
+        document.getElementById('emptyState').style.display = '';
+      }
+      renderSessionGrid(false, null, false);
+      document.getElementById('sessCount').textContent = sessions.length;
+    } else {
+      alert('Delete failed: ' + (res.error || 'unknown error'));
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+  btn.disabled = false; btn.textContent = 'Delete';
+  closeDeleteModal();
+}
+// Close modal on overlay click
+document.getElementById('deleteModal').addEventListener('click', function(e) {
+  if (e.target === this) closeDeleteModal();
+});
+
+// ─── BENCHMARK ───────────────────────────────────────────────────────────────
+let benchMode = 'demo';
+let benchPollTimer = null;
+let benchStartTime = null;
+let benchTimerInterval = null;
+
+const BENCH_ALL_SYMS = ['R_10','R_25','R_50','R_75','R_100','1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V'];
+
+function initBenchSymChecklist() {
+  const wrap = document.getElementById('benchSymChecks');
+  if (!wrap) return;
+  wrap.innerHTML = BENCH_ALL_SYMS.map(s => `
+    <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.73rem;font-weight:600;color:var(--text2)">
+      <input type="checkbox" class="bench-sym-chk" value="${s}" checked style="accent-color:var(--blue-light)">
+      ${s}
+    </label>`).join('');
+}
+
+function benchSymAll(checked) {
+  document.querySelectorAll('.bench-sym-chk').forEach(c => c.checked = checked);
+}
+
+function setBenchMode(m) {
+  benchMode = m;
+  document.getElementById('bModeDemo').className = 'mode-btn' + (m==='demo'?' active-demo':'');
+  document.getElementById('bModeReal').className = 'mode-btn' + (m==='real'?' active-real':'');
+}
+
+function buildBenchConfig() {
+  const token = document.getElementById('bToken').value.trim()
+    || document.getElementById('fToken')?.value?.trim() || '';
+  const algos = [...document.querySelectorAll('.bench-algo-chk:checked')].map(c => c.value);
+  const syms  = [...document.querySelectorAll('.bench-sym-chk:checked')].map(c => c.value);
+  return {
+    token,
+    account_mode:     benchMode,
+    algos,
+    symbols:          syms,
+    capital_per_algo: parseFloat(document.getElementById('bCapital').value) || 2500,
+    loss_limit:       parseFloat(document.getElementById('bLossLimit').value) || 500,
+    profit_target:    parseFloat(document.getElementById('bProfitTarget').value) || 250,
+    base_stake:       parseFloat(document.getElementById('bBaseStake').value) || 1.0,
+    martingale:       parseFloat(document.getElementById('bMartingale').value) || 2.0,
+    max_stake:        parseFloat(document.getElementById('bMaxStake').value) || 50,
+    score_threshold:  parseFloat(document.getElementById('bThreshold').value) || 0.60,
+    trade_strategy:   document.getElementById('bTradeStrategy').value,
+    app_id:           1089,
+  };
+}
+
+async function startBenchmark() {
+  const cfg = buildBenchConfig();
+  if (!cfg.token) { alert('Please enter your API token.'); return; }
+  if (!cfg.algos.length) { alert('Select at least one algorithm.'); return; }
+  if (!cfg.symbols.length) { alert('Select at least one symbol.'); return; }
+
+  const btn = document.getElementById('benchStartBtn');
+  btn.disabled = true; btn.innerHTML = '<div class="spinner" style="margin-right:6px"></div> Launching…';
+
+  try {
+    const res = await apiPost('?api=benchmark_start', cfg);
+    if (res.success) {
+      benchStartTime = Date.now();
+      startBenchPoll();
+      document.getElementById('benchStopBtn').style.display = '';
+      document.getElementById('benchRunnersSection').style.display = '';
+      document.getElementById('benchResultsSection').style.display = 'none';
+      updateBenchSidebarDot(true);
+    } else {
+      alert('Failed to start benchmark.\n' + (res.out || ''));
+    }
+  } catch(e) { alert('Error: ' + e.message); }
+  btn.disabled = false; btn.innerHTML = '▶ Start Race';
+}
+
+async function stopBenchmark() {
+  if (!confirm('Stop all benchmark runners?')) return;
+  await apiPost('?api=benchmark_stop', {});
+  stopBenchPoll();
+  document.getElementById('benchStopBtn').style.display = 'none';
+  updateBenchSidebarDot(false);
+}
+
+function startBenchPoll() {
+  stopBenchPoll();
+  pollBenchmark();
+  benchPollTimer = setInterval(pollBenchmark, 3000);
+  // Timer display
+  if (benchTimerInterval) clearInterval(benchTimerInterval);
+  benchTimerInterval = setInterval(() => {
+    if (!benchStartTime) return;
+    const sec = Math.floor((Date.now() - benchStartTime) / 1000);
+    const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+    const el = document.getElementById('benchTimer');
+    if (el) el.textContent = `Elapsed: ${h?h+'h ':''}${m?m+'m ':''}${s}s`;
+  }, 1000);
+}
+
+function stopBenchPoll() {
+  if (benchPollTimer)    { clearInterval(benchPollTimer);    benchPollTimer = null; }
+  if (benchTimerInterval){ clearInterval(benchTimerInterval); benchTimerInterval = null; }
+}
+
+async function pollBenchmark() {
+  try {
+    const d = await apiFetch('?api=benchmark_status');
+    if (!d.state) return;
+    renderBenchRunners(d.state);
+    const status = d.state.status;
+    if (status === 'completed' || status === 'stopped') {
+      stopBenchPoll();
+      document.getElementById('benchStopBtn').style.display = 'none';
+      updateBenchSidebarDot(false);
+      renderBenchResults(d.state);
+      document.getElementById('benchResultsSection').style.display = '';
+      document.getElementById('benchStatusLabel').textContent = status === 'completed' ? 'Completed' : 'Stopped';
+    }
+  } catch(e) { console.error('Benchmark poll:', e); }
+}
+
+function renderBenchRunners(state) {
+  const grid = document.getElementById('benchRunnerGrid');
+  if (!grid) return;
+  const runners = state.runners || {};
+  const profitTarget = state.config?.profit_target || 0;
+  const lossLimit    = state.config?.loss_limit || 0;
+
+  grid.innerHTML = Object.entries(runners).map(([algo, r]) => {
+    const pnl    = r.net_pnl ?? 0;
+    const pnlCls = pnl > 0 ? 'brc-pnl-pos' : pnl < 0 ? 'brc-pnl-neg' : '';
+    const wr     = ((r.win_rate ?? 0) * 100).toFixed(1);
+    const status = r.status || 'starting';
+    let cardCls = 'bench-runner-card';
+    let badgeCls = 'brc-badge';
+    let badgeTxt = status;
+    if (status === 'running')  { cardCls += ' running'; badgeCls += ' running'; badgeTxt = '● Live'; }
+    else if (status === 'done') {
+      const reason = r.end_reason || '';
+      if (reason === 'profit_reached') { cardCls += ' done-profit'; badgeCls += ' profit'; badgeTxt = '✓ Profit'; }
+      else if (reason === 'loss_limit_hit') { cardCls += ' done-loss'; badgeCls += ' loss'; badgeTxt = '✗ Loss'; }
+      else { cardCls += ' done-stopped'; badgeCls += ' stopped'; badgeTxt = 'Stopped'; }
+    } else if (status === 'starting') { badgeCls += ' starting'; badgeTxt = 'Starting…'; }
+    const dur = r.duration_seconds ? fmtDur(r.duration_seconds) : '—';
+    const initEq = r.initial_equity != null ? `$${parseFloat(r.initial_equity).toFixed(2)}` : '—';
+    const curEq  = r.current_equity != null ? `$${parseFloat(r.current_equity).toFixed(2)}` : '—';
+    const progress = profitTarget > 0 ? Math.min(100, Math.max(0, (pnl / profitTarget) * 100)) : 0;
+    const progressColor = pnl >= 0 ? 'var(--green-light)' : 'var(--red-light)';
+    return `<div class="${cardCls}">
+      <div class="brc-head">
+        <div class="brc-algo">${algo}</div>
+        <div class="${badgeCls}">${badgeTxt}</div>
+      </div>
+      <div class="brc-stats">
+        <div class="brc-stat"><div class="k">Net P&L</div><div class="v ${pnlCls}">${pnl>=0?'+':''}$${pnl.toFixed(2)}</div></div>
+        <div class="brc-stat"><div class="k">Win Rate</div><div class="v">${wr}%</div></div>
+        <div class="brc-stat"><div class="k">Trades</div><div class="v">${r.trades ?? 0}</div></div>
+        <div class="brc-stat"><div class="k">W / L</div><div class="v">${r.wins??0} / ${r.losses??0}</div></div>
+        <div class="brc-stat"><div class="k">Max W Streak</div><div class="v" style="color:var(--green-light)">${r.max_win_streak??0}</div></div>
+        <div class="brc-stat"><div class="k">Max L Streak</div><div class="v" style="color:var(--red-light)">${r.max_loss_streak??0}</div></div>
+        <div class="brc-stat"><div class="k">Equity</div><div class="v">${curEq}</div></div>
+        <div class="brc-stat"><div class="k">Duration</div><div class="v">${dur}</div></div>
+      </div>
+      <div style="margin-top:10px">
+        <div style="display:flex;justify-content:space-between;font-size:.64rem;color:var(--text4);margin-bottom:3px">
+          <span>Progress to target</span><span>${progress.toFixed(0)}%</span>
+        </div>
+        <div style="height:4px;border-radius:2px;background:var(--surface3);overflow:hidden">
+          <div style="height:100%;width:${progress}%;background:${progressColor};border-radius:2px;transition:width .4s"></div>
+        </div>
+      </div>
+    </div>`;
+  }).join('');
+
+  const lbl = document.getElementById('benchStatusLabel');
+  if (lbl) {
+    const running = Object.values(runners).filter(r => r.status === 'running' || r.status === 'starting').length;
+    lbl.textContent = running > 0 ? `${running} running` : 'All finished';
+  }
+  const dot = document.getElementById('benchDot');
+  const sbDot = document.getElementById('sidebarBenchDot');
+  const alive = Object.values(runners).some(r => r.status === 'running' || r.status === 'starting');
+  if (dot) dot.className = 'status-dot ' + (alive ? 'on' : 'off');
+  if (sbDot) sbDot.className = 'si-dot ' + (alive ? 'on' : 'off');
+}
+
+function renderBenchResults(state) {
+  const runners = state.runners || {};
+  // Sort by net_pnl descending
+  const sorted = Object.entries(runners)
+    .map(([algo, r]) => ({algo, ...r}))
+    .sort((a, b) => (b.net_pnl ?? 0) - (a.net_pnl ?? 0));
+
+  const endReasonLabel = {
+    profit_reached: '🏆 Profit target',
+    loss_limit_hit: '💀 Loss limit',
+    manual_stop: '⏹ Manual stop',
+    stopped: '⏹ Stopped',
+  };
+
+  document.getElementById('benchResultsBody').innerHTML = sorted.map((r, i) => {
+    const pnl = r.net_pnl ?? 0;
+    const pnlCls = pnl > 0 ? 'brc-pnl-pos' : pnl < 0 ? 'brc-pnl-neg' : '';
+    const wr  = ((r.win_rate ?? 0) * 100).toFixed(1);
+    const dur = r.duration_seconds ? fmtDur(r.duration_seconds) : '—';
+    const reason = endReasonLabel[r.end_reason] || r.end_reason || '—';
+    const statusBadge = r.end_reason === 'profit_reached'
+      ? '<span class="badge" style="background:var(--green-bg);color:var(--green-light)">Won</span>'
+      : r.end_reason === 'loss_limit_hit'
+        ? '<span class="badge" style="background:var(--red-bg);color:var(--red-light)">Lost</span>'
+        : '<span class="badge" style="background:var(--surface3);color:var(--text3)">—</span>';
+    return `<tr class="${i===0?'rank-1':''}">
+      <td style="font-weight:700;color:${i===0?'var(--green-light)':i===1?'var(--amber)':i===2?'var(--text3)':'var(--text4)'}">${i===0?'🥇':i===1?'🥈':i===2?'🥉':`#${i+1}`}</td>
+      <td style="font-weight:700">${r.algo}</td>
+      <td>${statusBadge}</td>
+      <td class="${pnlCls}" style="font-weight:700">${pnl>=0?'+':''}$${pnl.toFixed(2)}</td>
+      <td>${r.trades ?? 0}</td>
+      <td>${wr}%</td>
+      <td><span style="color:var(--green-light)">${r.wins??0}</span> / <span style="color:var(--red-light)">${r.losses??0}</span></td>
+      <td style="color:var(--green-light)">${r.max_win_streak ?? 0}</td>
+      <td style="color:var(--red-light)">${r.max_loss_streak ?? 0}</td>
+      <td>${dur}</td>
+      <td style="font-size:.75rem;color:var(--text3)">${reason}</td>
+    </tr>`;
+  }).join('');
+}
+
+function clearBenchResults() {
+  document.getElementById('benchResultsSection').style.display = 'none';
+  document.getElementById('benchRunnersSection').style.display = 'none';
+}
+
+function updateBenchSidebarDot(on) {
+  const el = document.getElementById('sidebarBenchDot');
+  if (el) el.className = 'si-dot ' + (on ? 'on' : 'off');
+}
+
+function fmtDur(sec) {
+  if (!sec) return '—';
+  if (sec < 60) return sec + 's';
+  if (sec < 3600) return Math.floor(sec/60) + 'm ' + String(sec%60).padStart(2,'0') + 's';
+  return Math.floor(sec/3600) + 'h ' + Math.floor((sec%3600)/60) + 'm';
+}
+
+// Sync token field from Bot Control if user switches tabs
+function syncBenchToken() {
+  const src = document.getElementById('fToken');
+  const dst = document.getElementById('bToken');
+  if (src && dst && !dst.value) dst.value = src.value;
+}
+
 // ─── BOOT ────────────────────────────────────────────────────────────────────
 initSymChecklist();
+initBenchSymChecklist();
 onStrategyChange();
 init();
 refreshDaemonStatus();

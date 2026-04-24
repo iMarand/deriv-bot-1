@@ -1550,6 +1550,7 @@ def main():
         help="Pulse: slow window size in ticks (default 50)",
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
+    parser.add_argument("--app-json", type=str, default=None, help="Override session output file path (default: auto-generated in data/)")
     args = parser.parse_args()
 
     # Logging
@@ -1606,9 +1607,13 @@ def main():
                 excluded_symbols,
             )
 
-    # Auto-generate session file in data/ folder
+    # Session output file: use override if provided, else auto-generate in data/
     data_dir = Path(__file__).parent / "data"
-    session_file = data_dir / f"{random.randint(1000, 9999)}-trades.json"
+    if args.app_json:
+        session_file = Path(args.app_json)
+        session_file.parent.mkdir(parents=True, exist_ok=True)
+    else:
+        session_file = data_dir / f"{random.randint(1000, 9999)}-trades.json"
     logging.getLogger("deriv_bot").info("Session data → %s", session_file)
 
     # Optional adaptive gates — only built when --strategy adaptive or --ml-filter is set
