@@ -7,11 +7,12 @@ State written to : data/benchmark_state.json    (polled by analysis.php)
 
 Each algorithm gets its own tmux session (bbot-bench-<algo>) and its own
 session JSON file.  The orchestrator monitors every 5 s and shuts down any
-bot whose profit_target / loss_limit / capital has been reached.
+bot whose profit_target / loss_limit has been reached.
 When all runners are done it writes a final comparison and exits.
 """
 
 import json
+import logging
 import os
 import random
 import subprocess
@@ -22,25 +23,54 @@ from pathlib import Path
 DATA_DIR    = Path(__file__).parent / "data"
 CONFIG_FILE = DATA_DIR / "benchmark_config.json"
 STATE_FILE  = DATA_DIR / "benchmark_state.json"
+LOG_FILE    = DATA_DIR / "benchmark_orchestrator.log"
+
 POLL_SEC    = 5
+# How long to wait before treating a dead session as truly stopped
+# (gives the bot time to finish WebSocket handshake + first tick subscription)
+GRACE_SEC   = 90
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-5s | %(message)s",
+    datefmt="%H:%M:%S",
+    handlers=[
+        logging.StreamHandler(sys.stdout),
+        logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
+    ],
+)
+log = logging.getLogger("benchmark")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
 
 def tmux_running(name: str) -> bool:
-    r = subprocess.run(["tmux", "has-session", "-t", f"={name}"],
-                       capture_output=True)
+    r = subprocess.run(
+        ["tmux", "has-session", "-t", f"={name}"],
+        capture_output=True,
+    )
     return r.returncode == 0
 
 
 def kill_tmux(name: str) -> None:
-    subprocess.run(["tmux", "kill-session", "-t", f"={name}"],
-                   capture_output=True)
+    subprocess.run(
+        ["tmux", "kill-session", "-t", f"={name}"],
+        capture_output=True,
+    )
+
+
+def tmux_logs(name: str, lines: int = 300) -> str:
+    """Capture last N lines from a tmux pane."""
+    r = subprocess.run(
+        ["tmux", "capture-pane", "-t", f"={name}", "-p", "-S", f"-{lines}"],
+        capture_output=True, text=True,
+    )
+    return r.stdout if r.returncode == 0 else ""
 
 
 def read_json(path: Path):
     try:
-        with open(path) as f:
+        with open(path, encoding="utf-8") as f:
             return json.load(f)
     except Exception:
         return None
@@ -48,7 +78,7 @@ def read_json(path: Path):
 
 def write_json(path: Path, obj) -> None:
     tmp = path.with_suffix(".tmp")
-    with open(tmp, "w") as f:
+    with open(tmp, "w", encoding="utf-8") as f:
         json.dump(obj, f, indent=2)
     os.replace(tmp, path)
 
@@ -65,28 +95,25 @@ def compute_streaks(trades: list) -> tuple:
     return max_win, max_loss
 
 
-def snapshot_from_file(path: Path, profit_target: float, loss_limit: float) -> dict:
-    data = read_json(path) or {}
-    summary  = data.get("summary", {})
-    session  = data.get("session", {})
-    trades   = data.get("trades", [])
-    mw, ml   = compute_streaks(trades)
-    net_pnl  = summary.get("net_pnl", 0.0)
-    duration = 0
-    started  = session.get("started_at")
-    updated  = session.get("updated_at")
-    if started and updated:
-        duration = int(updated - started)
+def snapshot_from_file(path: Path) -> dict:
+    data    = read_json(path) or {}
+    summary = data.get("summary", {})
+    session = data.get("session", {})
+    trades  = data.get("trades", [])
+    mw, ml  = compute_streaks(trades)
+    started = session.get("started_at")
+    updated = session.get("updated_at")
+    duration = int(updated - started) if (started and updated) else 0
     return {
-        "trades":          summary.get("trade_count", 0),
-        "wins":            summary.get("wins", 0),
-        "losses":          summary.get("losses", 0),
-        "net_pnl":         round(net_pnl, 4),
-        "win_rate":        round(summary.get("win_rate", 0.0), 4),
-        "initial_equity":  session.get("initial_equity"),
-        "current_equity":  session.get("current_equity"),
-        "max_win_streak":  mw,
-        "max_loss_streak": ml,
+        "trades":           summary.get("trade_count", 0),
+        "wins":             summary.get("wins", 0),
+        "losses":           summary.get("losses", 0),
+        "net_pnl":          round(summary.get("net_pnl", 0.0), 4),
+        "win_rate":         round(summary.get("win_rate", 0.0), 4),
+        "initial_equity":   session.get("initial_equity"),
+        "current_equity":   session.get("current_equity"),
+        "max_win_streak":   mw,
+        "max_loss_streak":  ml,
         "duration_seconds": duration,
     }
 
@@ -94,6 +121,9 @@ def snapshot_from_file(path: Path, profit_target: float, loss_limit: float) -> d
 # ── launcher ─────────────────────────────────────────────────────────────────
 
 def build_bot_command(cfg: dict, algo: str, sess_file: Path) -> str:
+    # Use forward slashes so the bash script works on all platforms
+    sess_path_str = sess_file.as_posix()
+
     token        = cfg["token"]
     mode         = cfg.get("account_mode", "demo")
     app_id       = cfg.get("app_id", 1089)
@@ -108,44 +138,52 @@ def build_bot_command(cfg: dict, algo: str, sess_file: Path) -> str:
     symbols      = cfg.get("symbols", [])
     sym_str      = " ".join(symbols) if symbols else ""
 
-    cmd = (
-        f"python3 bot.py"
-        f" --token {token}"
-        f" --account-mode {mode}"
-        f" --app-id {app_id}"
-        f" --base-stake {base_stake}"
-        f" --martingale {martingale}"
-        f" --max-stake {max_stake}"
-        f" --max-losses {max_losses}"
-        f" --profit-target {profit_tgt}"
-        f" --loss-limit {loss_limit}"
-        f" --score-threshold {threshold}"
-        f" --strategy {algo}"
-        f" --trade-strategy {trade_strat}"
-    )
+    parts = [
+        "python3", "bot.py",
+        "--token", token,
+        "--account-mode", mode,
+        "--app-id", str(app_id),
+        "--base-stake", str(base_stake),
+        "--martingale", str(martingale),
+        "--max-stake", str(max_stake),
+        "--max-losses", str(max_losses),
+        "--profit-target", str(profit_tgt),
+        "--loss-limit", str(loss_limit),
+        "--score-threshold", str(threshold),
+        "--strategy", algo,
+        "--trade-strategy", trade_strat,
+    ]
     if sym_str:
-        cmd += f" --symbols {sym_str}"
-    cmd += f" --app-json {sess_file}"
-    return cmd
+        parts += ["--symbols"] + symbols
+    parts += ["--app-json", sess_path_str]
+
+    return " ".join(parts)
 
 
 def launch_runner(cfg: dict, algo: str, sess_file: Path, tmux_name: str) -> None:
     kill_tmux(tmux_name)
+    time.sleep(0.3)  # give tmux a moment to fully kill the old session
+
     cmd     = build_bot_command(cfg, algo, sess_file)
-    script  = Path(f".launcher-bench-{algo}.sh")
-    script.write_text(f"#!/bin/bash\n{cmd}\n")
-    script.chmod(0o755)
-    subprocess.run(
-        ["tmux", "new-session", "-d", "-s", tmux_name, f"bash {script}"],
-        capture_output=True,
+    script  = Path(__file__).parent / f".launcher-bench-{algo}.sh"
+    script.write_text(f"#!/bin/bash\ncd {Path(__file__).parent.as_posix()}\n{cmd}\n",
+                      encoding="utf-8")
+
+    result = subprocess.run(
+        ["tmux", "new-session", "-d", "-s", tmux_name, f"bash {script.as_posix()}"],
+        capture_output=True, text=True,
     )
+    if result.returncode != 0:
+        log.error("Failed to launch tmux session %s: %s", tmux_name, result.stderr.strip())
+    else:
+        log.info("Launched %s → tmux:%s  session:%s", algo, tmux_name, sess_file.name)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
 
 def main() -> None:
     if not CONFIG_FILE.exists():
-        print("benchmark_config.json not found — start from the dashboard.", file=sys.stderr)
+        log.error("benchmark_config.json not found — start from the dashboard.")
         sys.exit(1)
 
     cfg           = read_json(CONFIG_FILE)
@@ -154,10 +192,13 @@ def main() -> None:
     loss_limit    = float(cfg.get("loss_limit", cfg.get("capital_per_algo", 2500)))
 
     if not algos:
-        print("No algorithms configured.", file=sys.stderr)
+        log.error("No algorithms configured.")
         sys.exit(1)
 
-    # Build initial runner records
+    log.info("Starting benchmark: algos=%s  profit_target=%s  loss_limit=%s",
+             algos, profit_target, loss_limit)
+
+    # ── build initial runner records ──────────────────────────────────────────
     runners = {}
     for algo in algos:
         rand_id    = random.randint(1000, 9999)
@@ -166,7 +207,7 @@ def main() -> None:
         runners[algo] = {
             "status":           "starting",
             "tmux_session":     tmux_name,
-            "session_file":     str(sess_file),
+            "session_file":     sess_file.as_posix(),
             "started_at":       None,
             "ended_at":         None,
             "end_reason":       None,
@@ -191,17 +232,17 @@ def main() -> None:
     }
     write_json(STATE_FILE, state)
 
-    # Launch all bots simultaneously
+    # ── launch all bots simultaneously ────────────────────────────────────────
     now = time.time()
     for algo, r in runners.items():
         launch_runner(cfg, algo, Path(r["session_file"]), r["tmux_session"])
         r["status"]     = "running"
         r["started_at"] = now
-        print(f"[benchmark] Launched {algo} → {r['session_file']}")
 
     write_json(STATE_FILE, state)
+    log.info("All runners launched. Monitoring every %ds …", POLL_SEC)
 
-    # Monitor loop
+    # ── monitor loop ──────────────────────────────────────────────────────────
     try:
         while True:
             time.sleep(POLL_SEC)
@@ -210,16 +251,23 @@ def main() -> None:
                 if r["status"] not in ("running", "starting"):
                     continue
 
-                sess_path = Path(r["session_file"])
-                snap      = snapshot_from_file(sess_path, profit_target, loss_limit)
-
-                # Update live stats
+                sess_path   = Path(r["session_file"])
+                snap        = snapshot_from_file(sess_path)
                 r.update({k: snap[k] for k in snap})
 
                 still_alive = tmux_running(r["tmux_session"])
+                elapsed     = time.time() - (r["started_at"] or time.time())
 
-                # Decide end reason when tmux session dies
                 if not still_alive:
+                    if elapsed < GRACE_SEC:
+                        # Bot might still be starting its WebSocket connection
+                        log.warning(
+                            "%s session not visible yet (%.0fs elapsed, grace=%ds) — waiting…",
+                            algo, elapsed, GRACE_SEC,
+                        )
+                        continue
+
+                    # Session is truly gone
                     net = snap["net_pnl"]
                     if net >= profit_target:
                         reason = "profit_reached"
@@ -227,25 +275,30 @@ def main() -> None:
                         reason = "loss_limit_hit"
                     else:
                         reason = "stopped"
+
                     r["status"]     = "done"
                     r["ended_at"]   = time.time()
                     r["end_reason"] = reason
-                    if r["started_at"]:
-                        r["duration_seconds"] = int(time.time() - r["started_at"])
-                    print(f"[benchmark] {algo} finished → {reason}  pnl={net:+.2f}")
+                    r["duration_seconds"] = int(elapsed)
+                    log.info("%s finished → %s  pnl=%+.2f  trades=%d",
+                             algo, reason, net, snap["trades"])
+                else:
+                    net = snap["net_pnl"]
+                    log.debug("%s alive  pnl=%+.2f  trades=%d  elapsed=%.0fs",
+                              algo, net, snap["trades"], elapsed)
 
             all_done = all(r["status"] == "done" for r in runners.values())
             if all_done:
                 state["status"]       = "completed"
                 state["completed_at"] = time.time()
                 write_json(STATE_FILE, state)
-                print("[benchmark] All runners finished.")
+                log.info("All runners finished — benchmark complete.")
                 break
 
             write_json(STATE_FILE, state)
 
     except KeyboardInterrupt:
-        print("\n[benchmark] Interrupted — stopping all runners.")
+        log.info("Interrupted — stopping all runners.")
         for algo, r in runners.items():
             if r["status"] in ("running", "starting"):
                 kill_tmux(r["tmux_session"])

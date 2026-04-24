@@ -591,18 +591,44 @@ if (isset($_GET['api'])) {
         exit;
     }
 
+    // ── Benchmark runner logs ────────────────────────────────────────────────
+    if ($_GET['api'] === 'bench_runner_logs') {
+        $algo = preg_replace('/[^a-z0-9_]/', '', strtolower($_GET['algo'] ?? ''));
+        if (!$algo) { echo json_encode(['logs'=>'']); exit; }
+
+        $tmuxName = 'bbot-bench-' . $algo;
+        $out = []; $logLines = '';
+        exec("tmux capture-pane -t =" . escapeshellarg($tmuxName) . " -p -S -400 2>&1", $out);
+        $logLines = implode("\n", $out);
+
+        // Also append last 50 lines from orchestrator log if readable
+        $orchLog = $DATA_DIR . '/benchmark_orchestrator.log';
+        $orchTail = '';
+        if (file_exists($orchLog)) {
+            $lines = file($orchLog, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            $orchTail = implode("\n", array_slice($lines, -30));
+        }
+
+        echo json_encode(['algo'=>$algo, 'logs'=>$logLines, 'orch_log'=>$orchTail]);
+        exit;
+    }
+
     // ── Benchmark stop ──────────────────────────────────────────────────────
     if ($_GET['api'] === 'benchmark_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $BENCH_TMUX = 'bbot-benchmark';
         // Kill orchestrator
         exec("tmux kill-session -t =" . escapeshellarg($BENCH_TMUX) . " 2>&1");
-        // Kill each per-algo runner session
+        // Kill each per-algo runner session and its bot.py process
         $stateFile = $DATA_DIR . '/benchmark_state.json';
         if (file_exists($stateFile)) {
             $state = json_decode(file_get_contents($stateFile), true) ?? [];
             foreach ($state['runners'] ?? [] as $r) {
                 $ts = $r['tmux_session'] ?? '';
-                if ($ts) exec("tmux kill-session -t =" . escapeshellarg($ts) . " 2>&1");
+                if ($ts) {
+                    exec("tmux send-keys -t =" . escapeshellarg($ts) . " C-c 2>&1");
+                    usleep(300000);
+                    exec("tmux kill-session -t =" . escapeshellarg($ts) . " 2>&1");
+                }
             }
             // Mark state as stopped
             $state['status']       = 'stopped';
@@ -1023,6 +1049,17 @@ canvas{width:100%!important}
 .bench-results-table td{padding:9px 14px;border-bottom:1px solid var(--border);font-family:var(--mono)}
 .bench-results-table tr.rank-1 td:first-child{font-weight:700;color:var(--green-light)}
 .bench-results-table tr:hover td{background:var(--surface2)}
+
+/* ── BENCH LOG DRAWER ── */
+.bench-log-drawer{background:#0f1923;border-top:1px solid #2d3748;border-radius:0 0 var(--radius) var(--radius);padding:10px 12px;font-family:var(--mono);font-size:.68rem;color:#68d391;line-height:1.6;max-height:220px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;display:none}
+.bench-log-drawer.open{display:block}
+.brc-log-btn{font-size:.62rem;padding:2px 8px;border-radius:10px;border:1px solid var(--border2);background:transparent;color:var(--text3);cursor:pointer;font-family:var(--mono);transition:all .15s}
+.brc-log-btn:hover{border-color:var(--blue-light);color:var(--blue-light)}
+.brc-log-btn.active{border-color:var(--blue-light);color:var(--blue-light);background:var(--blue-bg)}
+
+/* ── ORCH LOG CARD ── */
+.orch-log-box{background:#0f1923;border-radius:var(--radius-sm);padding:12px;font-family:var(--mono);font-size:.68rem;color:#90cdf4;line-height:1.6;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all;border:1px solid #2d3748}
+.orch-log-box.empty{color:#4a5568;font-style:italic}
 
 /* ── CONFIRM MODAL ── */
 .modal-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.45);z-index:200;align-items:center;justify-content:center}
@@ -1829,6 +1866,29 @@ canvas{width:100%!important}
         </div>
       </div>
 
+      <!-- Orchestrator + per-algo logs -->
+      <div class="card" style="margin-top:16px;display:none" id="benchLogsCard">
+        <div class="card-header">
+          <h3>🖥️ Terminal Logs</h3>
+          <div style="display:flex;gap:8px;align-items:center">
+            <span style="font-size:.72rem;color:var(--text3)" id="benchLogAlgoLabel">Select a runner above to view its terminal</span>
+            <button class="btn btn-ghost btn-sm" onclick="refreshBenchLog()">↻</button>
+          </div>
+        </div>
+        <div class="card-body" style="padding:14px">
+          <!-- Per-algo tab bar (populated dynamically) -->
+          <div style="display:flex;gap:6px;flex-wrap:wrap;margin-bottom:10px" id="benchLogTabs"></div>
+          <!-- Bot terminal output -->
+          <div style="margin-bottom:4px;font-size:.65rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3)">Bot Terminal</div>
+          <div class="orch-log-box empty" id="benchBotLog">Select an algorithm tab above.</div>
+          <!-- Orchestrator log -->
+          <details style="margin-top:12px">
+            <summary style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--text3);cursor:pointer;user-select:none;margin-bottom:6px">Orchestrator Log</summary>
+            <div class="orch-log-box empty" id="benchOrchLog">No orchestrator log yet.</div>
+          </details>
+        </div>
+      </div>
+
     </div>
 
   </div><!-- /content -->
@@ -1884,10 +1944,16 @@ function switchTab(tab, el) {
         document.getElementById('benchStopBtn').style.display = '';
         updateBenchSidebarDot(true);
         if (!benchPollTimer) startBenchPoll();
+        else startBenchLogPoll(); // reattach log poll if we re-enter tab
       }
       if (s === 'completed' || s === 'stopped') {
         renderBenchResults(d.state);
         document.getElementById('benchResultsSection').style.display = '';
+        // Still allow log viewing after completion
+        if (!benchLogPollTimer) {
+          refreshBenchLog();
+          benchLogPollTimer = setInterval(refreshBenchLog, 5000);
+        }
       }
     }).catch(() => {});
   }
@@ -3296,6 +3362,7 @@ function startBenchPoll() {
   stopBenchPoll();
   pollBenchmark();
   benchPollTimer = setInterval(pollBenchmark, 3000);
+  startBenchLogPoll();
   // Timer display
   if (benchTimerInterval) clearInterval(benchTimerInterval);
   benchTimerInterval = setInterval(() => {
@@ -3310,6 +3377,7 @@ function startBenchPoll() {
 function stopBenchPoll() {
   if (benchPollTimer)    { clearInterval(benchPollTimer);    benchPollTimer = null; }
   if (benchTimerInterval){ clearInterval(benchTimerInterval); benchTimerInterval = null; }
+  stopBenchLogPoll();
 }
 
 async function pollBenchmark() {
@@ -3457,6 +3525,75 @@ function syncBenchToken() {
   const src = document.getElementById('fToken');
   const dst = document.getElementById('bToken');
   if (src && dst && !dst.value) dst.value = src.value;
+}
+
+// ─── BENCHMARK LOGS ──────────────────────────────────────────────────────────
+let activeLogAlgo = null;
+let benchLogPollTimer = null;
+
+function initBenchLogTabs(algos) {
+  const bar = document.getElementById('benchLogTabs');
+  if (!bar) return;
+  bar.innerHTML = algos.map(a => `
+    <button class="brc-log-btn" id="logTab-${a}" onclick="selectLogAlgo('${a}')">${a}</button>
+  `).join('');
+}
+
+function selectLogAlgo(algo) {
+  activeLogAlgo = algo;
+  document.querySelectorAll('.brc-log-btn').forEach(b => {
+    b.classList.toggle('active', b.id === `logTab-${algo}`);
+  });
+  const lbl = document.getElementById('benchLogAlgoLabel');
+  if (lbl) lbl.textContent = `Showing logs for: ${algo}`;
+  refreshBenchLog();
+}
+
+async function refreshBenchLog() {
+  if (!activeLogAlgo) return;
+  try {
+    const d = await apiFetch(`?api=bench_runner_logs&algo=${encodeURIComponent(activeLogAlgo)}`);
+    const botEl  = document.getElementById('benchBotLog');
+    const orchEl = document.getElementById('benchOrchLog');
+
+    if (botEl) {
+      const logs = (d.logs || '').trim();
+      botEl.className  = 'orch-log-box' + (logs ? '' : ' empty');
+      botEl.textContent = logs || `No output captured yet for ${activeLogAlgo}.\nThe bot may still be connecting — check back in a few seconds.`;
+      botEl.scrollTop  = botEl.scrollHeight;
+    }
+    if (orchEl) {
+      const ol = (d.orch_log || '').trim();
+      orchEl.className  = 'orch-log-box' + (ol ? '' : ' empty');
+      orchEl.textContent = ol || 'Orchestrator log is empty.';
+      orchEl.scrollTop  = orchEl.scrollHeight;
+    }
+  } catch(e) { console.error('Log fetch:', e); }
+}
+
+function startBenchLogPoll() {
+  stopBenchLogPoll();
+  if (activeLogAlgo) refreshBenchLog();
+  benchLogPollTimer = setInterval(() => { if (activeLogAlgo) refreshBenchLog(); }, 3000);
+}
+
+function stopBenchLogPoll() {
+  if (benchLogPollTimer) { clearInterval(benchLogPollTimer); benchLogPollTimer = null; }
+}
+
+// Override renderBenchRunners to also build log tabs if needed
+const _origRenderBenchRunners = renderBenchRunners;
+function renderBenchRunners(state) {
+  _origRenderBenchRunners(state);
+  const algos = Object.keys(state.runners || {});
+  if (algos.length && !document.getElementById(`logTab-${algos[0]}`)) {
+    initBenchLogTabs(algos);
+  }
+  // Show the logs card whenever we have runners
+  const card = document.getElementById('benchLogsCard');
+  if (card && algos.length) card.style.display = '';
+  // Auto-select first algo if none selected
+  if (!activeLogAlgo && algos.length) selectLogAlgo(algos[0]);
 }
 
 // ─── BOOT ────────────────────────────────────────────────────────────────────
