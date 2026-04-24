@@ -1251,6 +1251,13 @@ class DerivBot:
         """Background task to hot-reload configuration from auto-manager."""
         state_file = Path(__file__).parent / "data" / "manager_state.json"
         last_ts = 0.0
+        
+        if state_file.exists():
+            # If the state file is older than 2 minutes, treat it as stale
+            # and don't hot-reload from it immediately on startup.
+            if time.time() - state_file.stat().st_mtime > 120:
+                last_ts = state_file.stat().st_mtime
+
         while self._running:
             try:
                 if state_file.exists():
