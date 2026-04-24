@@ -3460,6 +3460,15 @@ function renderBenchRunners(state) {
   const alive = Object.values(runners).some(r => r.status === 'running' || r.status === 'starting');
   if (dot) dot.className = 'status-dot ' + (alive ? 'on' : 'off');
   if (sbDot) sbDot.className = 'si-dot ' + (alive ? 'on' : 'off');
+
+  // Build log tabs and show logs card on first render
+  const algos = Object.keys(runners);
+  if (algos.length) {
+    if (!document.getElementById('logTab-' + algos[0])) initBenchLogTabs(algos);
+    const logsCard = document.getElementById('benchLogsCard');
+    if (logsCard) logsCard.style.display = '';
+    if (!activeLogAlgo) selectLogAlgo(algos[0]);
+  }
 }
 
 function renderBenchResults(state) {
@@ -3581,20 +3590,6 @@ function stopBenchLogPoll() {
   if (benchLogPollTimer) { clearInterval(benchLogPollTimer); benchLogPollTimer = null; }
 }
 
-// Override renderBenchRunners to also build log tabs if needed
-const _origRenderBenchRunners = renderBenchRunners;
-function renderBenchRunners(state) {
-  _origRenderBenchRunners(state);
-  const algos = Object.keys(state.runners || {});
-  if (algos.length && !document.getElementById(`logTab-${algos[0]}`)) {
-    initBenchLogTabs(algos);
-  }
-  // Show the logs card whenever we have runners
-  const card = document.getElementById('benchLogsCard');
-  if (card && algos.length) card.style.display = '';
-  // Auto-select first algo if none selected
-  if (!activeLogAlgo && algos.length) selectLogAlgo(algos[0]);
-}
 
 // ─── BOOT ────────────────────────────────────────────────────────────────────
 initSymChecklist();
