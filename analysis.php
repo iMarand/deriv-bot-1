@@ -197,7 +197,7 @@ if (isset($_GET['api'])) {
         $martingale= floatval($body['martingale']   ?? 2.2);
         $maxStake  = floatval($body['max_stake']    ?? 50.0);
         $threshold = floatval($body['threshold']    ?? 0.60);
-        $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble','adaptive','novaburst'])
+        $strategy  = in_array($body['strategy']??'', ['alphabloom','pulse','ensemble','adaptive','novaburst','aegis'])
                      ? $body['strategy'] : 'alphabloom';
         $tradeStrategy = in_array($body['trade_strategy']??'', ['even_odd','rise_fall_roll','rise_fall_zigzag','higher_lower_roll','higher_lower_zigzag','over_under_roll','touch_notouch_zigzag'])
                          ? $body['trade_strategy'] : 'even_odd';
@@ -1353,6 +1353,7 @@ canvas{width:100%!important}
                     <option value="ensemble">Ensemble</option>
                     <option value="novaburst">NovaBurst (multi-layer)</option>
                     <option value="adaptive">Adaptive (Pulse + ML + hotness + vol)</option>
+                    <option value="aegis">Aegis (Defensive, Vol/RSI gated)</option>
                   </select>
                 </div>
                 <div class="form-group form-full">
@@ -1676,6 +1677,7 @@ canvas{width:100%!important}
             <label class="filter-check-label"><input type="checkbox" class="algoFilterChk" value="ensemble" checked> Ensemble</label>
             <label class="filter-check-label"><input type="checkbox" class="algoFilterChk" value="novaburst" checked> NovaBurst</label>
             <label class="filter-check-label"><input type="checkbox" class="algoFilterChk" value="adaptive" checked> Adaptive</label>
+            <label class="filter-check-label"><input type="checkbox" class="algoFilterChk" value="aegis" checked> Aegis</label>
           </div>
         </div>
         <div style="margin-bottom:14px">
@@ -1824,7 +1826,7 @@ canvas{width:100%!important}
           <div style="margin-bottom:14px">
             <label style="font-size:.68rem;font-weight:700;text-transform:uppercase;letter-spacing:.07em;color:var(--text3);display:block;margin-bottom:8px">Algorithms to Race</label>
             <div style="display:flex;flex-wrap:wrap;gap:8px" id="benchAlgoChecks">
-              <?php foreach(['ensemble','alphabloom','pulse','novaburst','adaptive'] as $a): ?>
+              <?php foreach(['ensemble','alphabloom','pulse','novaburst','adaptive','aegis'] as $a): ?>
               <label style="display:flex;align-items:center;gap:5px;padding:6px 14px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.76rem;font-weight:600;color:var(--text2);transition:all .12s">
                 <input type="checkbox" class="bench-algo-chk" value="<?= $a ?>" checked style="accent-color:var(--blue-light)">
                 <?= $a ?>
@@ -2997,7 +2999,7 @@ function renderScanCard(d, container) {
   const tradColor=trad>=70?'var(--green-light)':trad>=45?'var(--amber)':'var(--red-light)';
   const regColors={MEAN_REVERTING:'var(--green-light)',TRENDING:'var(--teal)',CHOPPY:'var(--red-light)',UNKNOWN:'var(--text3)'};
   const volColors={LOW:'var(--green-light)',MODERATE:'var(--teal)',HIGH:'var(--amber)',EXTREME:'var(--red-light)',UNKNOWN:'var(--text3)'};
-  const algoNames={alphabloom:'AlphaBloom',pulse:'Pulse',ensemble:'Ensemble',novaburst:'NovaBurst',adaptive:'Adaptive'};
+  const algoNames={alphabloom:'AlphaBloom',pulse:'Pulse',ensemble:'Ensemble',novaburst:'NovaBurst',adaptive:'Adaptive',aegis:'Aegis'};
   const tsNames={even_odd:'Even/Odd',rise_fall_roll:'Rise/Fall Roll',rise_fall_zigzag:'Rise/Fall Zigzag',higher_lower_roll:'H/L Roll',higher_lower_zigzag:'H/L Zigzag',over_under_roll:'O/U Roll',touch_notouch_zigzag:'Touch/NoTouch Zigzag'};
   const card=document.createElement('div'); card.className=cardClass;
   card.innerHTML=`<div class="scan-head"><span class="scan-sym">${d.symbol}</span><span class="${badgeClass}">${badgeText}</span></div>

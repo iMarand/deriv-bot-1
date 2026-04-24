@@ -144,6 +144,16 @@ class NovaBurstConfig:
 
 
 @dataclass
+class AegisConfig:
+    """Aegis highly sophisticated defensive algorithm parameters."""
+    rsi_period: int = 14
+    volatility_window: int = 20
+    digit_window: int = 25
+    min_warmup: int = 60
+    cooldown_ticks: int = 3
+
+
+@dataclass
 class IndexConfig:
     """Multi-index selection."""
     symbols: List[str] = field(default_factory=lambda: [
@@ -221,9 +231,10 @@ class BotConfig:
     rollcake: RollCakeConfig = field(default_factory=RollCakeConfig)
     zigzag: ZigzagConfig = field(default_factory=ZigzagConfig)
     novaburst: NovaBurstConfig = field(default_factory=NovaBurstConfig)
+    aegis: AegisConfig = field(default_factory=AegisConfig)
     index: IndexConfig = field(default_factory=IndexConfig)
     contract: ContractConfig = field(default_factory=ContractConfig)
     direction: DirectionPreferenceConfig = field(default_factory=DirectionPreferenceConfig)
     api: APIConfig = field(default_factory=APIConfig)
-    strategy: str = "ensemble"           # algorithm: "ensemble", "alphabloom", "pulse", "novaburst", "adaptive"
+    strategy: str = "ensemble"           # algorithm: "ensemble", "alphabloom", "pulse", "novaburst", "adaptive", "aegis"
     trade_strategy: str = "even_odd"     # contract strategy: see TRADE_STRATEGIES

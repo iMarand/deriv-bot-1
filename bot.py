@@ -28,6 +28,7 @@ from ensemble import EnsembleScorer, SignalSnapshot
 from alphabloom import AlphaBloomScorer
 from pulse import PulseScorer
 from novaburst import NovaBurstScorer
+from aegis import AegisScorer
 from rollcake import RollCakeScorer
 from zigzag import ZigzagScorer
 from money import (
@@ -110,6 +111,7 @@ class DerivBot:
         self._ab_scorers: Dict[str, AlphaBloomScorer] = {}  # per-symbol AlphaBloom
         self._pulse_scorers: Dict[str, PulseScorer] = {}  # per-symbol Pulse
         self._novaburst_scorers: Dict[str, NovaBurstScorer] = {}  # per-symbol NovaBurst
+        self._aegis_scorers: Dict[str, AegisScorer] = {}  # per-symbol Aegis
         self._rollcake_scorers: Dict[str, RollCakeScorer] = {}  # per-symbol RollCake
         self._zigzag_scorers: Dict[str, ZigzagScorer] = {}  # per-symbol Zigzag
 
@@ -194,6 +196,15 @@ class DerivBot:
             # NovaBurst
             nb_cfg = self.cfg.novaburst
             self._novaburst_scorers[symbol] = NovaBurstScorer(nb_cfg)
+            # Aegis
+            ag_cfg = self.cfg.aegis
+            self._aegis_scorers[symbol] = AegisScorer(
+                rsi_period=ag_cfg.rsi_period,
+                volatility_window=ag_cfg.volatility_window,
+                digit_window=ag_cfg.digit_window,
+                min_warmup=ag_cfg.min_warmup,
+                cooldown_ticks=ag_cfg.cooldown_ticks,
+            )
             # Pattern detectors (used by trade strategies)
             rc_cfg = self.cfg.rollcake
             self._rollcake_scorers[symbol] = RollCakeScorer(
@@ -462,6 +473,8 @@ class DerivBot:
         ps.update(quote_str)
         nb = self._novaburst_scorers[symbol]
         nb.update(quote_str)
+        ag = self._aegis_scorers[symbol]
+        ag.update(quote_str, price)
         # Feed price to pattern detectors
         rc = self._rollcake_scorers[symbol]
         rc.update(price)
@@ -501,11 +514,62 @@ class DerivBot:
             return self._process_tick_pulse(symbol, ps, rd)
         elif strategy == "novaburst":
             return self._process_tick_novaburst(symbol, nb, rd)
+        elif strategy == "aegis":
+            return self._process_tick_aegis(symbol, ag, rd)
         elif strategy == "adaptive":
             # Adaptive reuses pulse's scan/selection, then bot-level gates filter.
             return self._process_tick_pulse(symbol, ps, rd)
         else:
             return self._process_tick_ensemble(symbol, dt, vt, rd)
+
+    def _process_tick_aegis(
+        self, symbol: str, ag: AegisScorer, rd: RegimeDetector,
+    ) -> Optional[Tuple[str, SignalSnapshot]]:
+        """Aegis: scan all indices, trade the strongest one."""
+        if not ag.warmed:
+            self._set_symbol_status(symbol, f"warming {len(ag._prices)}/{ag.min_warmup} ticks")
+            return None
+
+        self._set_symbol_status(symbol, ag.get_status_string(), 0.0)
+
+        # Scan ALL symbols for best aegis signal
+        best_sym: Optional[str] = None
+        best_sig: Optional[SignalSnapshot] = None
+        best_score: float = -1.0
+
+        for s, s_ag in self._aegis_scorers.items():
+            if s not in self._hot_symbols:
+                continue
+            if not s_ag.warmed:
+                continue
+            s_rd = self._regime_detectors.get(s)
+            sig = s_ag.score(regime_det=s_rd)
+            if sig is None or not self._passes_direction_policy(sig):
+                continue
+            
+            rank = self._direction_adjusted_score(sig)
+            if rank > best_score:
+                best_score = rank
+                best_sym = s
+                best_sig = sig
+
+        if best_sym is None or best_sig is None:
+            return None
+
+        if best_sym != symbol:
+            self._set_symbol_status(
+                symbol,
+                f"waiting — {best_sym} is better ({self._direction_adjusted_score(best_sig):.3f})",
+                0.0,
+            )
+            return None
+
+        self._set_symbol_status(
+            symbol,
+            f"TRADE {best_sig.direction} score={best_sig.composite_score:.3f} | {ag.get_status_string()}",
+            best_sig.composite_score,
+        )
+        return (symbol, best_sig)
 
     def _process_tick_alphabloom(
         self, symbol: str, ab: AlphaBloomScorer, rd: RegimeDetector,

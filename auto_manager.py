@@ -76,7 +76,7 @@ def recommend_for_symbol(d, allowed_algos, allowed_ts):
             
             # Base algorithm conditions
             algo_ready = False
-            if a in ['pulse', 'ensemble', 'novaburst', 'adaptive']:
+            if a in ['pulse', 'ensemble', 'novaburst', 'adaptive', 'aegis']:
                 if dg.get('is_biased') and ps >= 0.55:
                     algo_ready = True
             elif a == 'alphabloom':
