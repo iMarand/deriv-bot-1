@@ -298,7 +298,15 @@ if (isset($_GET['api'])) {
             exec("tmux kill-session -t =bbot-autopilot 2>&1");
         }
         
-        $cmd = "tmux new-session -d -s bbot-autopilot \"python3 " . escapeshellarg($BOT_DIR . "/autopilot.py") . " 2>&1\"";
+        $launcher = $BOT_DIR . '/.launcher_ap.sh';
+        $script  = "#!/bin/bash\n";
+        $script .= "cd " . escapeshellarg($BOT_DIR) . "\n";
+        $script .= "python3 autopilot.py 2>&1\n";
+        $script .= "echo \"Autopilot exited with code $?\" >> data/autopilot.log\n";
+        $script .= "read\n";
+        file_put_contents($launcher, $script);
+        chmod($launcher, 0755);
+        $cmd = "tmux new-session -d -s bbot-autopilot bash " . escapeshellarg($launcher) . " 2>&1";
         exec($cmd, $out, $ret);
         echo json_encode(['success' => true]);
         exit;
@@ -326,6 +334,12 @@ if (isset($_GET['api'])) {
         if (file_exists($logFile)) {
             $logOut = [];
             exec("tail -n 100 " . escapeshellarg($logFile) . " 2>&1", $logOut);
+            $logs = implode("\n", $logOut);
+        }
+        
+        if (empty(trim($logs)) && $running) {
+            $logOut = [];
+            exec("tmux capture-pane -t =bbot-autopilot -p -S -100 2>&1", $logOut);
             $logs = implode("\n", $logOut);
         }
         
@@ -2990,7 +3004,7 @@ async function startAutopilot() {
     if (res.success) {
       document.getElementById('apStartBtn').style.display = 'none';
       document.getElementById('apStopBtn').style.display = 'block';
-      pollBgStatus();
+      pollAutopilotStatus();
     } else {
       alert('Failed to start Autopilot.');
     }
@@ -3010,7 +3024,7 @@ async function stopAutopilot() {
     if (res.success) {
       document.getElementById('apStartBtn').style.display = 'block';
       document.getElementById('apStopBtn').style.display = 'none';
-      pollBgStatus();
+      pollAutopilotStatus();
     }
   } catch(e) {}
   btn.disabled = false;
