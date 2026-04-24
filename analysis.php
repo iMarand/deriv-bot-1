@@ -271,6 +271,68 @@ if (isset($_GET['api'])) {
         exit;
     }
 
+    if ($_GET['api'] === 'autopilot_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $cfg = [
+            'max_daily_profit' => floatval($body['max_daily_profit'] ?? 100.0),
+            'stake_range' => [floatval($body['stake_min'] ?? 0.5), floatval($body['stake_max'] ?? 2.0)],
+            'sprint_tp_range' => [floatval($body['tp_min'] ?? 5.0), floatval($body['tp_max'] ?? 15.0)],
+            'sprint_sl_range' => [floatval($body['sl_min'] ?? -50.0), floatval($body['sl_max'] ?? -20.0)],
+            'cooldown_win_minutes' => floatval($body['cooldown_win'] ?? 2.0),
+            'cooldown_loss_minutes' => floatval($body['cooldown_loss'] ?? 5.0),
+            'use_benchmark' => !empty($body['use_benchmark']),
+            'benchmark_duration_minutes' => floatval($body['benchmark_duration'] ?? 5.0),
+            'allowed_algos' => $body['allowed_algos'] ?? ['adaptive', 'pulse', 'novaburst', 'aegis', 'ensemble', 'alphabloom'],
+            'token' => $body['token'] ?? '',
+            'account_mode' => $body['mode'] ?? 'demo',
+            'martingale' => floatval($body['martingale'] ?? 2.2),
+            'max_stake' => floatval($body['max_stake'] ?? 50.0)
+        ];
+        file_put_contents($DATA_DIR . '/autopilot_config.json', json_encode($cfg, JSON_PRETTY_PRINT));
+        
+        $chk=[]; $chkCode=-1;
+        exec("tmux has-session -t =bbot-autopilot 2>&1", $chk, $chkCode);
+        if ($chkCode === 0) {
+            exec("tmux send-keys -t =bbot-autopilot C-c 2>&1");
+            usleep(600000);
+            exec("tmux kill-session -t =bbot-autopilot 2>&1");
+        }
+        
+        $cmd = "tmux new-session -d -s bbot-autopilot \"python3 " . escapeshellarg($BOT_DIR . "/autopilot.py") . " 2>&1\"";
+        exec($cmd, $out, $ret);
+        echo json_encode(['success' => true]);
+        exit;
+    }
+
+    if ($_GET['api'] === 'autopilot_stop' && $_SERVER['REQUEST_METHOD'] === 'POST') {
+        exec("tmux send-keys -t =bbot-autopilot C-c 2>&1");
+        usleep(600000);
+        exec("tmux kill-session -t =bbot-autopilot 2>&1");
+        exec("pkill -9 -f \" bot\.py.*autopilot_sprint\" 2>&1");
+        echo json_encode(['success' => true]);
+        exit;
+    }
+
+    if ($_GET['api'] === 'autopilot_status') {
+        $out = []; $code = -1;
+        exec("tmux has-session -t =bbot-autopilot 2>&1", $out, $code);
+        $running = $code === 0;
+        
+        $stateFile = $DATA_DIR . '/autopilot_state.json';
+        $state = file_exists($stateFile) ? json_decode(file_get_contents($stateFile), true) : null;
+        
+        $logFile = $DATA_DIR . '/autopilot.log';
+        $logs = '';
+        if (file_exists($logFile)) {
+            $logOut = [];
+            exec("tail -n 100 " . escapeshellarg($logFile) . " 2>&1", $logOut);
+            $logs = implode("\n", $logOut);
+        }
+        
+        echo json_encode(['running' => $running, 'state' => $state, 'logs' => $logs]);
+        exit;
+    }
+
     if ($_GET['api'] === 'ml_files') {
         $files = glob($DATA_DIR . '/*.json') ?: [];
         $out = [];
@@ -1443,10 +1505,82 @@ canvas{width:100%!important}
               </div>
             </div>
           </div>
+
+          <div class="card" style="margin-top:16px">
+            <div class="card-header"><h3>🤖 Systematic Autopilot</h3></div>
+            <div class="card-body">
+              <div style="font-size:.75rem;color:var(--text3);margin-bottom:14px;line-height:1.5">
+                The Autopilot acts like a disciplined human trader. It runs the bot in short sprints, randomly selecting stakes and targets within your defined ranges. It uses the background scanner or demo benchmarks to automatically select the best algorithm. It pauses to cooldown after wins and losses, continuing until the daily profit goal is reached.
+              </div>
+              <div class="form-grid">
+                <div class="form-group form-full">
+                  <label>Max Daily Profit Goal ($)</label>
+                  <input type="number" id="apMaxDaily" value="100" step="1" min="1">
+                </div>
+                <div class="form-group">
+                  <label>Min Stake ($)</label>
+                  <input type="number" id="apStakeMin" value="0.5" step="0.1" min="0.35">
+                </div>
+                <div class="form-group">
+                  <label>Max Stake ($)</label>
+                  <input type="number" id="apStakeMax" value="2.0" step="0.1" min="0.35">
+                </div>
+                <div class="form-group">
+                  <label>Sprint TP Min ($)</label>
+                  <input type="number" id="apTpMin" value="5" step="1" min="1">
+                </div>
+                <div class="form-group">
+                  <label>Sprint TP Max ($)</label>
+                  <input type="number" id="apTpMax" value="15" step="1" min="1">
+                </div>
+                <div class="form-group">
+                  <label>Sprint SL Min ($)</label>
+                  <input type="number" id="apSlMin" value="-50" step="1" max="-1">
+                  <span class="hint">Most negative</span>
+                </div>
+                <div class="form-group">
+                  <label>Sprint SL Max ($)</label>
+                  <input type="number" id="apSlMax" value="-20" step="1" max="-1">
+                  <span class="hint">Least negative</span>
+                </div>
+                <div class="form-group">
+                  <label>Cooldown Win (min)</label>
+                  <input type="number" id="apCdWin" value="2" step="1" min="0">
+                </div>
+                <div class="form-group">
+                  <label>Cooldown Loss (min)</label>
+                  <input type="number" id="apCdLoss" value="5" step="1" min="0">
+                </div>
+              </div>
+              <div style="margin-top:14px;background:var(--surface2);border-radius:var(--radius-sm);padding:0 12px">
+                <div class="toggle-row">
+                  <div><div class="toggle-label">Use Demo Benchmarks</div><div class="toggle-sub">Race algos for 5 mins before real sprints</div></div>
+                  <label class="toggle"><input type="checkbox" id="apUseBench"><span class="toggle-slider"></span></label>
+                </div>
+              </div>
+              <div style="margin-top:14px">
+                <button class="btn btn-primary" id="apStartBtn" onclick="startAutopilot()" style="width:100%">🚀 Start Autopilot</button>
+                <button class="btn btn-danger" id="apStopBtn" onclick="stopAutopilot()" style="width:100%;display:none">⏹ Stop Autopilot</button>
+              </div>
+            </div>
+          </div>
         </div>
 
         <!-- RIGHT COLUMN: Live Logs via SSE -->
         <div>
+          <div class="card" style="margin-bottom:16px">
+            <div class="card-header">
+              <h3>Autopilot Logs</h3>
+              <div class="log-sse-status">
+                <div class="sse-dot off" id="apSseDot"></div>
+                <span id="apSseStatus">Disconnected</span>
+              </div>
+            </div>
+            <div class="card-body" style="padding:14px">
+              <div class="log-output empty" id="apLogOutput">Waiting for autopilot...</div>
+            </div>
+          </div>
+
           <div class="card">
             <div class="card-header">
               <h3>Live Logs — bbot</h3>
@@ -2827,6 +2961,62 @@ async function stopBot() {
   } catch(e) { btn.disabled=false; btn.innerHTML='⏹ Stop'; }
 }
 
+async function startAutopilot() {
+  const btn = document.getElementById('apStartBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner" style="margin-right:6px"></div> Starting...';
+  
+  const params = {
+    max_daily_profit: parseFloat(document.getElementById('apMaxDaily').value) || 100,
+    stake_min: parseFloat(document.getElementById('apStakeMin').value) || 0.5,
+    stake_max: parseFloat(document.getElementById('apStakeMax').value) || 2.0,
+    tp_min: parseFloat(document.getElementById('apTpMin').value) || 5.0,
+    tp_max: parseFloat(document.getElementById('apTpMax').value) || 15.0,
+    sl_min: parseFloat(document.getElementById('apSlMin').value) || -50.0,
+    sl_max: parseFloat(document.getElementById('apSlMax').value) || -20.0,
+    cooldown_win: parseFloat(document.getElementById('apCdWin').value) || 2.0,
+    cooldown_loss: parseFloat(document.getElementById('apCdLoss').value) || 5.0,
+    use_benchmark: document.getElementById('apUseBench').checked,
+    benchmark_duration: 5.0,
+    token: document.getElementById('fToken').value.trim() || 'gY5gbEpJVhih5NL',
+    mode: currentMode,
+    martingale: parseFloat(document.getElementById('fMartingale').value) || 2.2,
+    max_stake: parseFloat(document.getElementById('fMaxStake').value) || 50.0,
+    allowed_algos: ['adaptive', 'pulse', 'novaburst', 'aegis', 'ensemble', 'alphabloom']
+  };
+
+  try {
+    const res = await apiPost('?api=autopilot_start', params);
+    if (res.success) {
+      document.getElementById('apStartBtn').style.display = 'none';
+      document.getElementById('apStopBtn').style.display = 'block';
+      pollBgStatus();
+    } else {
+      alert('Failed to start Autopilot.');
+    }
+  } catch (e) { alert('Error: ' + e.message); }
+  
+  btn.disabled = false;
+  btn.innerHTML = '🚀 Start Autopilot';
+}
+
+async function stopAutopilot() {
+  if (!confirm('Stop the Autopilot manager and any running sprint bots?')) return;
+  const btn = document.getElementById('apStopBtn');
+  btn.disabled = true;
+  btn.innerHTML = '<div class="spinner"></div>';
+  try {
+    const res = await apiPost('?api=autopilot_stop', {});
+    if (res.success) {
+      document.getElementById('apStartBtn').style.display = 'block';
+      document.getElementById('apStopBtn').style.display = 'none';
+      pollBgStatus();
+    }
+  } catch(e) {}
+  btn.disabled = false;
+  btn.innerHTML = '⏹ Stop Autopilot';
+}
+
 // ─── SYMBOL CHECKLIST ─────────────────────────────────────────────────────────
 const ALL_SYMBOLS = ['R_10','R_25','R_50','R_75','R_100','1HZ10V','1HZ25V','1HZ50V','1HZ75V','1HZ100V'];
 
@@ -3251,6 +3441,48 @@ async function pollManagerLogs() {
   } catch(e) {}
 }
 
+let apPollTimer = null;
+async function pollAutopilotStatus() {
+  try {
+    const d = await apiFetch('?api=autopilot_status');
+    const dot = document.getElementById('apSseDot');
+    const msg = document.getElementById('apSseStatus');
+    const logEl = document.getElementById('apLogOutput');
+    const startBtn = document.getElementById('apStartBtn');
+    const stopBtn = document.getElementById('apStopBtn');
+    
+    if (d.running) {
+      dot.className = 'sse-dot on';
+      
+      const s = d.state || {};
+      const statusText = s.status || 'Running';
+      const cumPnl = s.cumulative_profit !== undefined ? s.cumulative_profit.toFixed(2) : '0.00';
+      const pnlColor = s.cumulative_profit >= 0 ? 'var(--green-light)' : 'var(--red-light)';
+      
+      msg.innerHTML = `<span style="color:var(--text)">${statusText}</span> <span style="color:var(--text3)">|</span> PnL: <span style="color:${pnlColor}">$${cumPnl}</span>`;
+      
+      startBtn.style.display = 'none';
+      stopBtn.style.display = 'block';
+      
+      if (d.logs && d.logs.trim()) {
+        logEl.className = 'log-output';
+        logEl.textContent = d.logs;
+        logEl.scrollTop = logEl.scrollHeight;
+      }
+      
+      if (!apPollTimer) apPollTimer = setInterval(pollAutopilotStatus, 2000);
+    } else {
+      dot.className = 'sse-dot off';
+      msg.textContent = 'Disconnected';
+      
+      startBtn.style.display = 'block';
+      stopBtn.style.display = 'none';
+      
+      if (apPollTimer) { clearInterval(apPollTimer); apPollTimer = null; }
+    }
+  } catch(e) {}
+}
+
 // ─── UTILS ───────────────────────────────────────────────────────────────────
 function fmtTs(ts) {
   if (!ts) return '—';
@@ -3632,6 +3864,7 @@ onStrategyChange();
 init();
 refreshDaemonStatus();
 pollManagerLogs();
+pollAutopilotStatus();
 </script>
 </body>
 </html>
