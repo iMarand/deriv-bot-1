@@ -152,6 +152,7 @@ def build_bot_command(cfg: dict, algo: str, sess_file: Path) -> str:
         "--score-threshold", str(threshold),
         "--strategy", algo,
         "--trade-strategy", trade_strat,
+        "--disable-hot-reload",
     ]
     if sym_str:
         parts += ["--symbols"] + symbols

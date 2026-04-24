@@ -91,12 +91,14 @@ class DerivBot:
         ml_filter=None,
         hotness_tracker=None,
         vol_gate: Optional[VolatilityGate] = None,
+        disable_hot_reload: bool = False,
     ):
         self.token = token
         self.cfg = cfg or BotConfig()
         self.account_mode = account_mode
         self.save_app_json = Path(save_app_json).resolve() if save_app_json else None
         self._disable_risk_engine = disable_risk_engine
+        self._disable_hot_reload = disable_hot_reload
         self.ws: Optional[websockets.WebSocketClientProtocol] = None
         self._running = False
         self._req_id = 0
@@ -1281,7 +1283,9 @@ class DerivBot:
         self._running = True
         retry_count = 0
         
-        watch_task = asyncio.create_task(self._watch_manager_state())
+        watch_task = None
+        if not self._disable_hot_reload:
+            watch_task = asyncio.create_task(self._watch_manager_state())
 
         while self._running:
             try:
@@ -1551,6 +1555,7 @@ def main():
     )
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--app-json", type=str, default=None, help="Override session output file path (default: auto-generated in data/)")
+    parser.add_argument("--disable-hot-reload", action="store_true", help="Disable hot-reloading of config from manager_state.json")
     args = parser.parse_args()
 
     # Logging
@@ -1658,6 +1663,7 @@ def main():
         ml_filter=ml_filter_instance,
         hotness_tracker=hotness_instance,
         vol_gate=vol_gate_instance,
+        disable_hot_reload=args.disable_hot_reload,
     )
 
     # Graceful shutdown on Ctrl+C
