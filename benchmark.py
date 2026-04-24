@@ -154,6 +154,11 @@ def build_bot_command(cfg: dict, algo: str, sess_file: Path) -> str:
         "--trade-strategy", trade_strat,
         "--disable-hot-reload",
     ]
+    if cfg.get("disable_kelly"):
+        parts.append("--disable-kelly")
+    if cfg.get("disable_risk"):
+        parts.append("--disable-risk-engine")
+        
     if sym_str:
         parts += ["--symbols"] + symbols
     parts += ["--app-json", sess_path_str]

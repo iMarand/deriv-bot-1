@@ -1798,6 +1798,20 @@ canvas{width:100%!important}
               </select>
             </div>
             <div class="form-group">
+              <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <span>Disable Kelly Sizing</span>
+                <label class="toggle"><input type="checkbox" id="bDisableKelly"><span class="toggle-slider"></span></label>
+              </label>
+              <div class="hint" style="margin-top:-4px">Base stake + martingale only</div>
+            </div>
+            <div class="form-group">
+              <label style="display:flex;justify-content:space-between;align-items:center;margin-bottom:6px">
+                <span>Disable Risk Engine</span>
+                <label class="toggle"><input type="checkbox" id="bDisableRisk"><span class="toggle-slider"></span></label>
+              </label>
+              <div class="hint" style="margin-top:-4px">No cooldown or circuit breaker</div>
+            </div>
+            <div class="form-group">
               <label>Account Mode</label>
               <div class="mode-group">
                 <button class="mode-btn active-demo" id="bModeDemo" onclick="setBenchMode('demo')">Demo</button>
@@ -3337,6 +3351,8 @@ function buildBenchConfig() {
     max_stake:        parseFloat(document.getElementById('bMaxStake').value) || 50,
     score_threshold:  parseFloat(document.getElementById('bThreshold').value) || 0.60,
     trade_strategy:   document.getElementById('bTradeStrategy').value,
+    disable_kelly:    document.getElementById('bDisableKelly')?.checked || false,
+    disable_risk:     document.getElementById('bDisableRisk')?.checked || false,
     app_id:           1089,
   };
 }
