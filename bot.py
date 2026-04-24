@@ -1555,9 +1555,9 @@ def main():
     parser.add_argument("--score-threshold", type=float, default=0.60, help="Ensemble score threshold")
     parser.add_argument(
         "--strategy",
-        choices=("ensemble", "alphabloom", "pulse", "novaburst", "adaptive"),
+        choices=("ensemble", "alphabloom", "pulse", "novaburst", "adaptive", "aegis"),
         default="ensemble",
-        help="Algorithm: 'ensemble', 'alphabloom', 'pulse', 'novaburst', or 'adaptive' (pulse + ML/hotness/vol gates)",
+        help="Algorithm: 'ensemble', 'alphabloom', 'pulse', 'novaburst', 'adaptive', or 'aegis'",
     )
     parser.add_argument(
         "--trade-strategy",
