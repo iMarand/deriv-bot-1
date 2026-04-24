@@ -160,23 +160,45 @@ def build_bot_command(cfg: dict, algo: str, sess_file: Path) -> str:
     return " ".join(parts)
 
 
+def log_file_for(algo: str) -> Path:
+    return DATA_DIR / f"bench-{algo}-bot.log"
+
+
 def launch_runner(cfg: dict, algo: str, sess_file: Path, tmux_name: str) -> None:
     kill_tmux(tmux_name)
-    time.sleep(0.3)  # give tmux a moment to fully kill the old session
+    time.sleep(0.3)
 
-    cmd     = build_bot_command(cfg, algo, sess_file)
-    script  = Path(__file__).parent / f".launcher-bench-{algo}.sh"
-    script.write_text(f"#!/bin/bash\ncd {Path(__file__).parent.as_posix()}\n{cmd}\n",
-                      encoding="utf-8")
+    bot_cmd  = build_bot_command(cfg, algo, sess_file)
+    log_path = log_file_for(algo).as_posix()
+    bot_dir  = Path(__file__).parent.as_posix()
+
+    # The launcher:
+    #  1. Redirects all bot output to a log file (persists after the pane dies)
+    #  2. Keeps the tmux pane alive via `tail -f` so we can still capture it
+    script_body = (
+        f"#!/bin/bash\n"
+        f"cd {bot_dir}\n"
+        f"LOG={log_path}\n"
+        f'echo "=== [{algo}] started at $(date) ===" > "$LOG"\n'
+        f"{bot_cmd} >> \"$LOG\" 2>&1\n"
+        f'EXIT_CODE=$?\n'
+        f'echo "" >> "$LOG"\n'
+        f'echo "=== [{algo}] EXITED (code $EXIT_CODE) at $(date) ===" >> "$LOG"\n'
+        f'echo ""\n'
+        f'echo "--- [{algo}] bot stopped (exit $EXIT_CODE) --- tail-following log ---"\n'
+        f'tail -f "$LOG"\n'   # keeps pane alive; tmux_running() stays True
+    )
+    script = Path(__file__).parent / f".launcher-bench-{algo}.sh"
+    script.write_text(script_body, encoding="utf-8")
 
     result = subprocess.run(
         ["tmux", "new-session", "-d", "-s", tmux_name, f"bash {script.as_posix()}"],
         capture_output=True, text=True,
     )
     if result.returncode != 0:
-        log.error("Failed to launch tmux session %s: %s", tmux_name, result.stderr.strip())
+        log.error("Failed to launch %s: %s", tmux_name, result.stderr.strip())
     else:
-        log.info("Launched %s → tmux:%s  session:%s", algo, tmux_name, sess_file.name)
+        log.info("Launched %s → tmux:%s  log:%s", algo, tmux_name, log_path)
 
 
 # ── main ─────────────────────────────────────────────────────────────────────
@@ -208,6 +230,7 @@ def main() -> None:
             "status":           "starting",
             "tmux_session":     tmux_name,
             "session_file":     sess_file.as_posix(),
+            "log_file":         log_file_for(algo).as_posix(),
             "started_at":       None,
             "ended_at":         None,
             "end_reason":       None,
@@ -255,19 +278,31 @@ def main() -> None:
                 snap        = snapshot_from_file(sess_path)
                 r.update({k: snap[k] for k in snap})
 
-                still_alive = tmux_running(r["tmux_session"])
-                elapsed     = time.time() - (r["started_at"] or time.time())
+                elapsed  = time.time() - (r["started_at"] or time.time())
+                log_path = Path(r["log_file"])
 
-                if not still_alive:
+                # Detect bot exit by looking for the "EXITED" marker in its log file.
+                # (The tmux pane stays alive via `tail -f`, so pane presence is not reliable.)
+                bot_exited = False
+                if log_path.exists():
+                    try:
+                        tail = log_path.read_text(encoding="utf-8", errors="replace")
+                        if "=== EXITED" in tail or "=== [" + algo + "] EXITED" in tail:
+                            bot_exited = True
+                    except OSError:
+                        pass
+
+                # Fallback: if tmux pane itself died (tail -f got killed externally)
+                if not bot_exited and not tmux_running(r["tmux_session"]):
                     if elapsed < GRACE_SEC:
-                        # Bot might still be starting its WebSocket connection
                         log.warning(
-                            "%s session not visible yet (%.0fs elapsed, grace=%ds) — waiting…",
+                            "%s tmux not visible yet (%.0fs, grace=%ds) — waiting…",
                             algo, elapsed, GRACE_SEC,
                         )
                         continue
+                    bot_exited = True
 
-                    # Session is truly gone
+                if bot_exited:
                     net = snap["net_pnl"]
                     if net >= profit_target:
                         reason = "profit_reached"
@@ -275,11 +310,12 @@ def main() -> None:
                         reason = "loss_limit_hit"
                     else:
                         reason = "stopped"
-
-                    r["status"]     = "done"
-                    r["ended_at"]   = time.time()
-                    r["end_reason"] = reason
+                    r["status"]           = "done"
+                    r["ended_at"]         = time.time()
+                    r["end_reason"]       = reason
                     r["duration_seconds"] = int(elapsed)
+                    # Kill the tail -f pane now that bot is done
+                    kill_tmux(r["tmux_session"])
                     log.info("%s finished → %s  pnl=%+.2f  trades=%d",
                              algo, reason, net, snap["trades"])
                 else:

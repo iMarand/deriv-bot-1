@@ -596,20 +596,36 @@ if (isset($_GET['api'])) {
         $algo = preg_replace('/[^a-z0-9_]/', '', strtolower($_GET['algo'] ?? ''));
         if (!$algo) { echo json_encode(['logs'=>'']); exit; }
 
-        $tmuxName = 'bbot-bench-' . $algo;
-        $out = []; $logLines = '';
-        exec("tmux capture-pane -t =" . escapeshellarg($tmuxName) . " -p -S -400 2>&1", $out);
-        $logLines = implode("\n", $out);
-
-        // Also append last 50 lines from orchestrator log if readable
-        $orchLog = $DATA_DIR . '/benchmark_orchestrator.log';
-        $orchTail = '';
-        if (file_exists($orchLog)) {
-            $lines = file($orchLog, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
-            $orchTail = implode("\n", array_slice($lines, -30));
+        // Primary: read from the persistent log file written by the launcher script
+        $logFile  = $DATA_DIR . '/bench-' . $algo . '-bot.log';
+        $logLines = '';
+        if (file_exists($logFile)) {
+            $logLines = file_get_contents($logFile) ?: '';
         }
 
-        echo json_encode(['algo'=>$algo, 'logs'=>$logLines, 'orch_log'=>$orchTail]);
+        // Fallback: if log file not yet created, try capturing the live tmux pane
+        if ($logLines === '') {
+            $tmuxName = 'bbot-bench-' . $algo;
+            $out = [];
+            exec("tmux capture-pane -t =" . escapeshellarg($tmuxName) . " -p -S -400 2>&1", $out);
+            $captured = implode("\n", $out);
+            // tmux returns an error string if pane not found — filter that out
+            if (strpos($captured, "can't find pane") === false) {
+                $logLines = $captured;
+            } else {
+                $logLines = "(Log file not yet created and tmux pane not found.\nThe bot may still be starting up.)";
+            }
+        }
+
+        // Orchestrator log (last 40 lines)
+        $orchLog  = $DATA_DIR . '/benchmark_orchestrator.log';
+        $orchTail = '';
+        if (file_exists($orchLog)) {
+            $lines    = file($orchLog, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES);
+            $orchTail = implode("\n", array_slice($lines, -40));
+        }
+
+        echo json_encode(['algo' => $algo, 'logs' => $logLines, 'orch_log' => $orchTail]);
         exit;
     }
 
