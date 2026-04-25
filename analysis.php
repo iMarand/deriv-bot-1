@@ -1221,6 +1221,9 @@ canvas{width:100%!important}
     <span class="si-icon">🤖</span> Bot Control
     <span class="si-dot off" id="sidebarBotDot"></span>
   </div>
+  <div class="sidebar-item" data-tab="autopilot" onclick="switchTab('autopilot',this)">
+    <span class="si-icon">🚀</span> Autopilot
+  </div>
   <div class="sidebar-section">Intelligence</div>
   <div class="sidebar-item" data-tab="training" onclick="switchTab('training',this)">
     <span class="si-icon">🧠</span> ML Training
@@ -1539,8 +1542,43 @@ canvas{width:100%!important}
               </div>
             </div>
           </div>
+        </div>
 
-          <div class="card" style="margin-top:16px">
+        <!-- RIGHT COLUMN: Live Logs via SSE -->
+        <div>
+
+          <div class="card">
+            <div class="card-header">
+              <h3>Live Logs — bbot</h3>
+              <div class="log-sse-status">
+                <div class="sse-dot off" id="sseDot"></div>
+                <span id="sseStatus">Disconnected</span>
+                <button class="btn btn-ghost btn-sm" onclick="reconnectSSE()" style="margin-left:8px;padding:3px 10px;font-size:.68rem">↻</button>
+              </div>
+            </div>
+            <div class="card-body" style="padding:14px">
+              <div class="log-output empty" id="logOutput">Connecting to live log stream...</div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    
+
+    <!-- ═══════════════ AUTOPILOT TAB ═══════════════ -->
+    <div class="tab-content" id="tab-autopilot">
+      <div class="page-header">
+        <h2>Autopilot</h2>
+        <p>Configure, manage, and monitor the Systematic Autopilot sprints</p>
+      </div>
+
+      <div class="ctrl-layout">
+        <!-- LEFT COLUMN -->
+        <div>
+
+
+          <div class="card">
             <div class="card-header"><h3>🤖 Systematic Autopilot</h3></div>
             <div class="card-body">
               <div style="font-size:.75rem;color:var(--text3);margin-bottom:14px;line-height:1.5">
@@ -1651,8 +1689,9 @@ canvas{width:100%!important}
           </div>
         </div>
 
-        <!-- RIGHT COLUMN: Live Logs via SSE -->
+        <!-- RIGHT COLUMN -->
         <div>
+
           <div class="card" style="margin-bottom:16px">
             <div class="card-header">
               <h3>Autopilot Logs</h3>
@@ -1750,25 +1789,10 @@ canvas{width:100%!important}
               <div id="apResEmpty" style="color:var(--text3);font-size:.75rem;text-align:center;padding:12px">No sprints yet.</div>
             </div>
           </div>
-
-          <div class="card">
-            <div class="card-header">
-              <h3>Live Logs — bbot</h3>
-              <div class="log-sse-status">
-                <div class="sse-dot off" id="sseDot"></div>
-                <span id="sseStatus">Disconnected</span>
-                <button class="btn btn-ghost btn-sm" onclick="reconnectSSE()" style="margin-left:8px;padding:3px 10px;font-size:.68rem">↻</button>
-              </div>
-            </div>
-            <div class="card-body" style="padding:14px">
-              <div class="log-output empty" id="logOutput">Connecting to live log stream...</div>
-            </div>
-          </div>
         </div>
       </div>
     </div>
-
-    <!-- ═══════════════ ML TRAINING TAB ═══════════════ -->
+<!-- ═══════════════ ML TRAINING TAB ═══════════════ -->
     <div class="tab-content" id="tab-training">
       <div class="page-header">
         <h2>ML Training</h2>
