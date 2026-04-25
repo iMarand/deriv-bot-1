@@ -776,41 +776,41 @@ if (isset($_GET['api'])) {
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
-  /* Primary palette — matches reference: whites, blues, teals */
-  --bg:#ffffff;
-  --surface:#ffffff;
-  --surface2:#f7fafc;
-  --surface3:#edf2f7;
-  --border:#cbd5e0;
-  --border2:#a0aec0;
+  /* Primary palette */
+  --bg: transparent;
+  --surface: rgba(15, 23, 42, 0.7);
+  --surface2: rgba(30, 41, 59, 0.7);
+  --surface3: rgba(51, 65, 85, 0.7);
+  --border: rgba(148, 163, 184, 0.15);
+  --border2: rgba(148, 163, 184, 0.25);
 
   /* Text */
-  --text:#1a202c;
-  --text2:#4a5568;
-  --text3:#718096;
-  --text4:#a0aec0;
+  --text: #f8fafc;
+  --text2: #e2e8f0;
+  --text3: #94a3b8;
+  --text4: #64748b;
 
   /* Accents */
-  --blue:#2b6cb0;
-  --blue-light:#3182ce;
-  --blue-bg:#ebf8ff;
-  --blue-border:#bee3f8;
-  --teal:#319795;
-  --teal-bg:#e6fffa;
-  --teal-border:#81e6d9;
-  --green:#276749;
-  --green-light:#38a169;
-  --green-bg:#f0fff4;
-  --green-border:#9ae6b4;
-  --red:#c53030;
-  --red-light:#e53e3e;
-  --red-bg:#fff5f5;
-  --red-border:#feb2b2;
-  --amber:#b7791f;
-  --amber-bg:#fffbeb;
-  --amber-border:#fcd34d;
-  --purple:#553c9a;
-  --purple-bg:#faf5ff;
+  --blue: #3b82f6;
+  --blue-light: #60a5fa;
+  --blue-bg: rgba(59, 130, 246, 0.15);
+  --blue-border: rgba(59, 130, 246, 0.3);
+  --teal: #14b8a6;
+  --teal-bg: rgba(20, 184, 166, 0.15);
+  --teal-border: rgba(20, 184, 166, 0.3);
+  --green: #10b981;
+  --green-light: #34d399;
+  --green-bg: rgba(16, 185, 129, 0.15);
+  --green-border: rgba(16, 185, 129, 0.3);
+  --red: #ef4444;
+  --red-light: #f87171;
+  --red-bg: rgba(239, 68, 68, 0.15);
+  --red-border: rgba(239, 68, 68, 0.3);
+  --amber: #f59e0b;
+  --amber-bg: rgba(245, 158, 11, 0.15);
+  --amber-border: rgba(245, 158, 11, 0.3);
+  --purple: #8b5cf6;
+  --purple-bg: rgba(139, 92, 246, 0.15);
 
   /* Sidebar */
   --sidebar-bg:#0f172a;
@@ -831,6 +831,11 @@ if (isset($_GET['api'])) {
 
 html{font-size:14px}
 body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:100vh;display:flex;overflow-x:hidden}
+
+.card, .config-info, .topbar, .session-card, .chart-card, .sym-card, .scan-card, .ml-status-card, .daemon-box {
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
 
 /* ── SIDEBAR ── */
 .sidebar{width:220px;min-height:100vh;background:var(--sidebar-bg);display:flex;flex-direction:column;flex-shrink:0;position:sticky;top:0;height:100vh;overflow-y:auto}
