@@ -777,7 +777,7 @@ if (isset($_GET['api'])) {
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   /* Primary palette — matches reference: whites, blues, teals */
-  --bg:#f0f4f8;
+  --bg:#ffffff;
   --surface:#ffffff;
   --surface2:#f7fafc;
   --surface3:#edf2f7;
