@@ -781,8 +781,8 @@ if (isset($_GET['api'])) {
   --surface:#ffffff;
   --surface2:#f7fafc;
   --surface3:#edf2f7;
-  --border:#e2e8f0;
-  --border2:#cbd5e0;
+  --border:#cbd5e0;
+  --border2:#a0aec0;
 
   /* Text */
   --text:#1a202c;
@@ -824,9 +824,9 @@ if (isset($_GET['api'])) {
   --radius:12px;
   --radius-sm:8px;
   --radius-lg:16px;
-  --shadow:0 1px 3px rgba(0,0,0,.08),0 1px 2px rgba(0,0,0,.05);
-  --shadow-md:0 4px 12px rgba(0,0,0,.08),0 2px 4px rgba(0,0,0,.05);
-  --shadow-lg:0 10px 25px rgba(0,0,0,.1),0 4px 10px rgba(0,0,0,.06);
+  --shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.08);
+  --shadow-md:0 4px 12px rgba(0,0,0,.12),0 2px 4px rgba(0,0,0,.08);
+  --shadow-lg:0 10px 25px rgba(0,0,0,.15),0 4px 10px rgba(0,0,0,.1);
 }
 
 html{font-size:14px}
