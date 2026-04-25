@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import random
 import subprocess
@@ -37,8 +38,11 @@ HISTORY_FILE = DATA_DIR / "autopilot_history.json"
 BENCH_STATE = DATA_DIR / "benchmark_state.json"
 LOG_FILE = DATA_DIR / "autopilot.log"
 
-# Deriv even/odd payout: stake → stake * 1.95 on win (profit = stake * 0.95).
-PAYOUT_FACTOR = 0.95
+# Deriv digit payout range: 1.85x – 1.95x (profit = stake * 0.85 to 0.95).
+# We use the WORST-CASE floor so one winning trade is always guaranteed to
+# cover the TP regardless of which index we land on.
+MIN_PAYOUT = 0.85   # worst-case profit multiplier (1.85x payout)
+MAX_PAYOUT = 0.95   # best-case (1.95x) — kept for reference
 
 # Truncate previous run's log so the UI shows ONLY the current session.
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -94,31 +98,34 @@ def write_json(path: Path, data: dict) -> None:
 # Stake sizing — make one win count
 # ─────────────────────────────────────────────────────────────────
 def compute_stake(
-    tp: float,
+    tp_requested: float,
     martingale: float,
     stake_min: float,
     stake_max: float,
     sizing_mode: str,
     max_stake_cap: float,
-) -> Tuple[float, float, int]:
-    """Return (base_stake, effective_max_stake, planned_steps).
+) -> Tuple[float, float, float, int]:
+    """Return (base_stake, final_tp, effective_max_stake, planned_steps).
 
-    Sizing modes:
-      oneshot       → first win hits TP        (stake = TP / 0.95)
-      twoshot       → 2 wins hit TP            (stake = TP / (2 * 0.95))
-      conservative  → ~4 wins to hit TP        (stake = TP / (4 * 0.95))
-      random        → random in [stake_min, stake_max] (legacy)
+    Stake is computed from the requested TP then clamped to [stake_min, stake_max].
+    After clamping, TP is RECALCULATED from the actual stake using MIN_PAYOUT
+    (worst-case 1.85x) so that ONE winning trade is guaranteed to cover TP even
+    on the lowest-paying index.  This prevents the "$19.83 TP on a $20 stake"
+    situation where the first win only returns $19 and the bot fires a second trade.
 
-    The base stake is clamped into [stake_min, stake_max]. effective_max is
-    the cap forwarded to bot.py (--max-stake), bounded by the user's config.
+    Modes:
+      oneshot       → 1 win covers TP   (stake = tp / MIN_PAYOUT)
+      twoshot       → 2 wins cover TP   (stake = tp / (2 × MIN_PAYOUT))
+      conservative  → ~4 wins cover TP  (stake = tp / (4 × MIN_PAYOUT))
+      random        → random in [min, max]; TP unchanged
     """
     mode = (sizing_mode or "oneshot").lower()
     if mode == "oneshot":
-        base = tp / PAYOUT_FACTOR
+        base = tp_requested / MIN_PAYOUT
     elif mode == "twoshot":
-        base = tp / (2.0 * PAYOUT_FACTOR)
+        base = tp_requested / (2.0 * MIN_PAYOUT)
     elif mode == "conservative":
-        base = tp / (4.0 * PAYOUT_FACTOR)
+        base = tp_requested / (4.0 * MIN_PAYOUT)
     else:
         base = random.uniform(stake_min, stake_max)
 
@@ -126,13 +133,24 @@ def compute_stake(
         base = max(stake_min, min(base, stake_max))
     base = round(base, 2)
 
+    # Derive TP from the ACTUAL (possibly clamped) stake using MIN_PAYOUT.
+    # This guarantees one win at worst-case payout always hits the TP.
+    if mode == "oneshot":
+        final_tp = round(base * MIN_PAYOUT, 2)
+    elif mode == "twoshot":
+        final_tp = round(base * MIN_PAYOUT * 2.0, 2)
+    elif mode == "conservative":
+        final_tp = round(base * MIN_PAYOUT * 4.0, 2)
+    else:
+        final_tp = tp_requested  # random mode: keep original TP
+
     steps = 0
     s = base
     while s * martingale <= max_stake_cap and steps < 12:
         s *= martingale
         steps += 1
     effective_max = min(max_stake_cap, s)
-    return base, round(effective_max, 2), steps
+    return base, final_tp, round(effective_max, 2), steps
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -230,13 +248,42 @@ def algo_score_from_scanner(algo: str, scan_data: Optional[dict]) -> Tuple[float
     return best, f"scan peak={best:.2f}"
 
 
+def _softmax_sample(rows: List[Tuple[str, float, str]], temperature: float = 0.4) -> int:
+    """Sample an index from rows using softmax probabilities.
+
+    Lower temperature → more greedy (winner dominates).
+    Higher temperature → more uniform exploration.
+    """
+    scores = [r[1] for r in rows]
+    max_s = max(scores)
+    exp_s = [math.exp((s - max_s) / temperature) for s in scores]
+    total = sum(exp_s)
+    probs = [e / total for e in exp_s]
+    r = random.random()
+    cumsum = 0.0
+    for i, p in enumerate(probs):
+        cumsum += p
+        if r <= cumsum:
+            return i
+    return len(rows) - 1
+
+
 def select_algo(
     allowed: List[str],
     history: dict,
     scan_data: Optional[dict],
     use_benchmark: bool,
     weights: Dict[str, float],
+    last_algo: Optional[str] = None,
+    consecutive_count: int = 0,
 ) -> Tuple[str, str]:
+    """Pick the best algorithm using weighted multi-source scoring + softmax sampling.
+
+    Consecutive-use penalty: if the same algo was picked N times in a row, its
+    score is reduced so other algos get a real chance to compete.  This prevents
+    the autopilot from locking onto one algo for dozens of sprints even when it
+    is performing well (diversity is healthier long-term).
+    """
     if not allowed:
         return "adaptive", "no allowed algos → fallback adaptive"
 
@@ -256,16 +303,28 @@ def select_algo(
         w_h, w_b, w_s = w_h / total, w_b / total, w_s / total
 
         composite = h_score * w_h + b_score * w_b + s_score * w_s
-        rows.append((a, composite, f"{h_expl} | {b_expl} | {s_expl} | composite={composite:.3f}"))
+
+        # Consecutive-use penalty: −0.12 per repeat after the 2nd pick in a row,
+        # capped at −0.36 (3 repeats). This nudges diversity without overriding
+        # a genuinely better algo outright.
+        penalty = 0.0
+        if a == last_algo and consecutive_count >= 2:
+            penalty = min(0.36, 0.12 * (consecutive_count - 1))
+            composite = max(0.0, composite - penalty)
+
+        notes = f"{h_expl} | {b_expl} | {s_expl} | composite={composite:.3f}"
+        if penalty:
+            notes += f" (repeat-penalty={penalty:.2f})"
+        rows.append((a, composite, notes))
 
     rows.sort(key=lambda r: r[1], reverse=True)
 
-    # ε-greedy exploration: occasionally pick the runner-up.
-    if len(rows) > 1 and random.random() < 0.15:
-        a, _, expl = rows[1]
-        return a, f"EXPLORE {a} → {expl}"
-    a, _, expl = rows[0]
-    return a, f"BEST {a} → {expl}"
+    # Softmax sampling: all algos have a chance proportional to their score.
+    # Temperature=0.4 keeps it mostly greedy while ensuring real exploration.
+    idx = _softmax_sample(rows, temperature=0.4)
+    a, _, expl = rows[idx]
+    rank_label = "BEST" if idx == 0 else f"EXPLORE(rank={idx+1})"
+    return a, f"{rank_label} {a} → {expl}"
 
 
 # ─────────────────────────────────────────────────────────────────
@@ -312,6 +371,8 @@ def main() -> None:
     history = load_history()
     session_started_at = time.time()
     sprints: List[dict] = []
+    last_algo: Optional[str] = None
+    consecutive_count: int = 0
 
     while True:
         cfg = load_json(CONFIG_FILE)
@@ -365,7 +426,10 @@ def main() -> None:
         weights = cfg.get("selection_weights") or {
             "history": 0.5, "benchmark": 0.3, "scanner": 0.2,
         }
-        algo, reasoning = select_algo(allowed, history, scan_data, use_bench, weights)
+        algo, reasoning = select_algo(
+            allowed, history, scan_data, use_bench, weights,
+            last_algo=last_algo, consecutive_count=consecutive_count,
+        )
         ts = cfg.get("trade_strategy", "even_odd")
 
         # ── Stake sizing ──
@@ -376,15 +440,17 @@ def main() -> None:
         martingale = float(cfg.get("martingale", 2.2))
         max_stake_cap = float(cfg.get("max_stake", 50.0))
 
-        tp = round(random.uniform(min(tp_min, tp_max), max(tp_min, tp_max)), 2)
+        # tp_requested is random within the configured range.
+        # compute_stake will clamp the stake then derive the ACTUAL tp from it.
+        tp_requested = round(random.uniform(min(tp_min, tp_max), max(tp_min, tp_max)), 2)
         sl = round(random.uniform(min(sl_min, sl_max), max(sl_min, sl_max)), 2)
-        base_stake, effective_max, steps = compute_stake(
-            tp, martingale, stake_min, stake_max, sizing_mode, max_stake_cap,
+        base_stake, tp, effective_max, steps = compute_stake(
+            tp_requested, martingale, stake_min, stake_max, sizing_mode, max_stake_cap,
         )
 
         log.info(f"Algorithm: {algo}")
         log.info(f"  reason: {reasoning}")
-        log.info(f"Sizing: mode={sizing_mode} base=${base_stake:.2f} → 1 win = +${base_stake * PAYOUT_FACTOR:.2f}")
+        log.info(f"Sizing: mode={sizing_mode} base=${base_stake:.2f} → 1 win ≥ +${base_stake * MIN_PAYOUT:.2f} (worst-case 1.85x)")
         log.info(f"Sprint TP=+${tp:.2f}  SL=${sl:.2f}  martingale=x{martingale} (~{steps} steps to ${effective_max:.2f})")
 
         # ── Build bot.py command ──
@@ -466,6 +532,13 @@ def main() -> None:
         cumulative_profit += sprint_net
         update_history(history, algo, sprint_net)
         save_history(history)
+
+        # Track consecutive algo picks for the rotation penalty.
+        if algo == last_algo:
+            consecutive_count += 1
+        else:
+            consecutive_count = 1
+        last_algo = algo
 
         sprints.append({
             "sprint": sprint_count,

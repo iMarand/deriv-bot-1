@@ -1595,6 +1595,14 @@ canvas{width:100%!important}
                   <label>Cooldown Loss (min)</label>
                   <input type="number" id="apCdLoss" value="5" step="1" min="0">
                 </div>
+                <div class="form-group">
+                  <label>Martingale Multiplier</label>
+                  <input type="number" id="apMartingale" value="2.2" step="0.1" min="1.1" max="10">
+                </div>
+                <div class="form-group">
+                  <label>Max Stake per Trade ($)</label>
+                  <input type="number" id="apMaxStake" value="50" step="1" min="1">
+                </div>
               </div>
 
               <!-- Allowed Algorithms (multi-select) -->
@@ -1658,12 +1666,13 @@ canvas{width:100%!important}
           </div>
 
           <!-- Sprint History panel -->
-          <div class="card" style="margin-bottom:16px" id="apResultCard" style="display:none">
+          <div class="card" style="margin-bottom:16px;display:none" id="apResultCard">
             <div class="card-header">
               <h3>Sprint History</h3>
               <span id="apResultStatus" style="font-size:.7rem;color:var(--text3)"></span>
             </div>
             <div class="card-body" style="padding:14px">
+              <div id="apSessionStarted" style="font-size:.68rem;color:var(--text3);margin-bottom:10px"></div>
               <!-- Summary row -->
               <div id="apResultSummary" style="display:none;margin-bottom:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
                 <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px;text-align:center">
@@ -1693,12 +1702,34 @@ canvas{width:100%!important}
                   <div id="apResProgressBar" style="height:100%;background:var(--green-light);width:0%;transition:width .4s ease;border-radius:4px"></div>
                 </div>
               </div>
+              <!-- Filters -->
+              <div id="apResFilters" style="display:none;margin-bottom:10px;display:flex;flex-wrap:wrap;gap:8px;align-items:center">
+                <select id="apFiltAlgo" style="font-size:.72rem;padding:3px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text)" onchange="applySprintFilters()">
+                  <option value="">All algos</option>
+                </select>
+                <select id="apFiltOutcome" style="font-size:.72rem;padding:3px 7px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text)" onchange="applySprintFilters()">
+                  <option value="">All outcomes</option>
+                  <option value="win">Win sprints</option>
+                  <option value="loss">Loss sprints</option>
+                </select>
+                <label style="font-size:.72rem;color:var(--text3);display:flex;align-items:center;gap:4px">
+                  Min trades:
+                  <input type="number" id="apFiltMinTrades" value="0" min="0" step="1" style="width:52px;font-size:.72rem;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text)" onchange="applySprintFilters()">
+                </label>
+                <label style="font-size:.72rem;color:var(--text3);display:flex;align-items:center;gap:4px">
+                  Min loss streak:
+                  <input type="number" id="apFiltMinLoss" value="0" min="0" step="1" style="width:52px;font-size:.72rem;padding:3px 5px;background:var(--surface2);border:1px solid var(--border);border-radius:var(--radius-sm);color:var(--text)" onchange="applySprintFilters()">
+                </label>
+                <button class="btn btn-ghost btn-sm" onclick="resetSprintFilters()" style="font-size:.68rem;padding:3px 10px">✕ Reset</button>
+                <span id="apFiltCount" style="font-size:.68rem;color:var(--text3)"></span>
+              </div>
               <!-- Per-sprint table -->
               <div id="apResTableWrap" style="overflow-x:auto;display:none">
                 <table style="width:100%;border-collapse:collapse;font-size:.72rem">
                   <thead>
                     <tr style="border-bottom:1px solid var(--border);color:var(--text3)">
                       <th style="padding:4px 6px;text-align:left">#</th>
+                      <th style="padding:4px 6px;text-align:left">Started</th>
                       <th style="padding:4px 6px;text-align:left">Algo</th>
                       <th style="padding:4px 6px;text-align:right">Stake</th>
                       <th style="padding:4px 6px;text-align:right">TP</th>
@@ -3133,8 +3164,8 @@ async function startAutopilot() {
     allowed_algos: allowedAlgos,
     token: document.getElementById('fToken').value.trim() || 'gY5gbEpJVhih5NL',
     mode: currentMode,
-    martingale: parseFloat(document.getElementById('fMartingale').value) || 2.2,
-    max_stake: parseFloat(document.getElementById('fMaxStake').value) || 50.0,
+    martingale: parseFloat(document.getElementById('apMartingale').value) || 2.2,
+    max_stake: parseFloat(document.getElementById('apMaxStake').value) || 50.0,
     trade_strategy: document.getElementById('fTradeStrategy') ? document.getElementById('fTradeStrategy').value : 'even_odd'
   };
 
