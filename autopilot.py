@@ -31,6 +31,7 @@ from typing import Optional, Tuple, List, Dict
 DATA_DIR = Path(__file__).parent / "data"
 CONFIG_FILE = DATA_DIR / "autopilot_config.json"
 STATE_FILE = DATA_DIR / "autopilot_state.json"
+RESULT_FILE = DATA_DIR / "autopilot_result.json"
 SCAN_FILE = DATA_DIR / "market_scan.json"
 HISTORY_FILE = DATA_DIR / "autopilot_history.json"
 BENCH_STATE = DATA_DIR / "benchmark_state.json"
@@ -309,6 +310,8 @@ def main() -> None:
     sprint_count = 0
     benchmark_done = False
     history = load_history()
+    session_started_at = time.time()
+    sprints: List[dict] = []
 
     while True:
         cfg = load_json(CONFIG_FILE)
@@ -327,6 +330,21 @@ def main() -> None:
                 "current_algo": "DONE",
                 "status": "GOAL REACHED",
                 "updated_at": time.time(),
+            })
+            write_json(RESULT_FILE, {
+                "session_started_at": round(session_started_at),
+                "last_updated": round(time.time()),
+                "max_daily_profit": max_daily,
+                "cumulative_profit": round(cumulative_profit, 2),
+                "sprints_completed": sprint_count,
+                "total_trades": sum(s["trades"] for s in sprints),
+                "total_wins": sum(s["wins"] for s in sprints),
+                "total_losses": sum(s["losses"] for s in sprints),
+                "overall_win_rate": round(
+                    sum(s["wins"] for s in sprints) / max(1, sum(s["trades"] for s in sprints)), 4
+                ),
+                "status": "GOAL REACHED",
+                "sprints": sprints,
             })
             break
 
@@ -424,10 +442,12 @@ def main() -> None:
 
         # ── Run sprint ──
         bot_log = DATA_DIR / "autopilot_bot.log"
+        sprint_started_at = time.time()
         log.info("Sprint live — bot running...")
         with open(bot_log, "w", encoding="utf-8") as f:
             f.write(f"=== SPRINT #{sprint_count} | {algo} | base=${base_stake:.2f} | tp=${tp} ===\n")
             proc = subprocess.run(cmd, stdout=f, stderr=subprocess.STDOUT)
+        sprint_ended_at = time.time()
         log.info(f"Sprint exit code: {proc.returncode}")
 
         # ── Resolve sprint result ──
@@ -438,11 +458,49 @@ def main() -> None:
             sprint_net = float(sd["summary"].get("net_pnl", 0.0))
             trades = int(sd["summary"].get("trade_count", 0))
             wins = int(sd["summary"].get("wins", 0))
-        log.info(f"Result: trades={trades}  wins={wins}  net=${sprint_net:+.2f}")
+        losses = trades - wins
+        wr = round(wins / trades, 4) if trades > 0 else 0.0
+        duration_s = int(sprint_ended_at - sprint_started_at)
+        log.info(f"Result: trades={trades}  wins={wins}  losses={losses}  wr={wr:.0%}  net=${sprint_net:+.2f}  duration={duration_s}s")
 
         cumulative_profit += sprint_net
         update_history(history, algo, sprint_net)
         save_history(history)
+
+        sprints.append({
+            "sprint": sprint_count,
+            "algo": algo,
+            "trade_strategy": ts,
+            "sizing_mode": sizing_mode,
+            "base_stake": base_stake,
+            "tp": tp,
+            "sl": sl,
+            "started_at": round(sprint_started_at),
+            "ended_at": round(sprint_ended_at),
+            "duration_s": duration_s,
+            "trades": trades,
+            "wins": wins,
+            "losses": losses,
+            "win_rate": wr,
+            "net_pnl": round(sprint_net, 2),
+            "cumulative_after": round(cumulative_profit, 2),
+        })
+
+        write_json(RESULT_FILE, {
+            "session_started_at": round(session_started_at),
+            "last_updated": round(time.time()),
+            "max_daily_profit": max_daily,
+            "cumulative_profit": round(cumulative_profit, 2),
+            "sprints_completed": sprint_count,
+            "total_trades": sum(s["trades"] for s in sprints),
+            "total_wins": sum(s["wins"] for s in sprints),
+            "total_losses": sum(s["losses"] for s in sprints),
+            "overall_win_rate": round(
+                sum(s["wins"] for s in sprints) / max(1, sum(s["trades"] for s in sprints)), 4
+            ),
+            "status": "RUNNING",
+            "sprints": sprints,
+        })
 
         write_json(STATE_FILE, {
             "cumulative_profit": cumulative_profit,

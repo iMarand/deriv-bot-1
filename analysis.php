@@ -342,10 +342,13 @@ if (isset($_GET['api'])) {
         $out = []; $code = -1;
         exec("tmux has-session -t =bbot-autopilot 2>&1", $out, $code);
         $running = $code === 0;
-        
+
         $stateFile = $DATA_DIR . '/autopilot_state.json';
         $state = file_exists($stateFile) ? json_decode(file_get_contents($stateFile), true) : null;
-        
+
+        $resultFile = $DATA_DIR . '/autopilot_result.json';
+        $result = file_exists($resultFile) ? json_decode(file_get_contents($resultFile), true) : null;
+
         $logFile = $DATA_DIR . '/autopilot.log';
         $logs = '';
         if (file_exists($logFile)) {
@@ -353,14 +356,14 @@ if (isset($_GET['api'])) {
             exec("tail -n 100 " . escapeshellarg($logFile) . " 2>&1", $logOut);
             $logs = implode("\n", $logOut);
         }
-        
+
         if (empty(trim($logs)) && $running) {
             $logOut = [];
             exec("tmux capture-pane -t =bbot-autopilot -p -S -100 2>&1", $logOut);
             $logs = implode("\n", $logOut);
         }
-        
-        echo json_encode(['running' => $running, 'state' => $state, 'logs' => $logs]);
+
+        echo json_encode(['running' => $running, 'state' => $state, 'result' => $result, 'logs' => $logs]);
         exit;
     }
 
@@ -1651,6 +1654,67 @@ canvas{width:100%!important}
             </div>
             <div class="card-body" style="padding:14px">
               <div class="log-output empty" id="apLogOutput">Waiting for autopilot...</div>
+            </div>
+          </div>
+
+          <!-- Sprint History panel -->
+          <div class="card" style="margin-bottom:16px" id="apResultCard" style="display:none">
+            <div class="card-header">
+              <h3>Sprint History</h3>
+              <span id="apResultStatus" style="font-size:.7rem;color:var(--text3)"></span>
+            </div>
+            <div class="card-body" style="padding:14px">
+              <!-- Summary row -->
+              <div id="apResultSummary" style="display:none;margin-bottom:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+                <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px;text-align:center">
+                  <div style="font-size:.65rem;color:var(--text3);margin-bottom:2px">Total P&amp;L</div>
+                  <div id="apResTotalPnl" style="font-size:1.1rem;font-weight:700;font-family:var(--mono)">—</div>
+                </div>
+                <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px;text-align:center">
+                  <div style="font-size:.65rem;color:var(--text3);margin-bottom:2px">Sprints</div>
+                  <div id="apResSprints" style="font-size:1.1rem;font-weight:700;font-family:var(--mono)">—</div>
+                </div>
+                <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px;text-align:center">
+                  <div style="font-size:.65rem;color:var(--text3);margin-bottom:2px">Win Rate</div>
+                  <div id="apResWr" style="font-size:1.1rem;font-weight:700;font-family:var(--mono)">—</div>
+                </div>
+                <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px;text-align:center">
+                  <div style="font-size:.65rem;color:var(--text3);margin-bottom:2px">Total Trades</div>
+                  <div id="apResTrades" style="font-size:1.1rem;font-weight:700;font-family:var(--mono)">—</div>
+                </div>
+              </div>
+              <!-- Progress bar -->
+              <div id="apResProgressWrap" style="display:none;margin-bottom:12px">
+                <div style="display:flex;justify-content:space-between;font-size:.68rem;color:var(--text3);margin-bottom:4px">
+                  <span>Progress to daily goal</span>
+                  <span id="apResProgressLbl">—</span>
+                </div>
+                <div style="background:var(--surface2);border-radius:4px;height:6px;overflow:hidden">
+                  <div id="apResProgressBar" style="height:100%;background:var(--green-light);width:0%;transition:width .4s ease;border-radius:4px"></div>
+                </div>
+              </div>
+              <!-- Per-sprint table -->
+              <div id="apResTableWrap" style="overflow-x:auto;display:none">
+                <table style="width:100%;border-collapse:collapse;font-size:.72rem">
+                  <thead>
+                    <tr style="border-bottom:1px solid var(--border);color:var(--text3)">
+                      <th style="padding:4px 6px;text-align:left">#</th>
+                      <th style="padding:4px 6px;text-align:left">Algo</th>
+                      <th style="padding:4px 6px;text-align:right">Stake</th>
+                      <th style="padding:4px 6px;text-align:right">TP</th>
+                      <th style="padding:4px 6px;text-align:right">SL</th>
+                      <th style="padding:4px 6px;text-align:right">Trades</th>
+                      <th style="padding:4px 6px;text-align:right">W/L</th>
+                      <th style="padding:4px 6px;text-align:right">WR%</th>
+                      <th style="padding:4px 6px;text-align:right">Net P&amp;L</th>
+                      <th style="padding:4px 6px;text-align:right">Cumulative</th>
+                      <th style="padding:4px 6px;text-align:right">Duration</th>
+                    </tr>
+                  </thead>
+                  <tbody id="apResTableBody"></tbody>
+                </table>
+              </div>
+              <div id="apResEmpty" style="color:var(--text3);font-size:.75rem;text-align:center;padding:12px">No sprints yet.</div>
             </div>
           </div>
 
@@ -3537,6 +3601,79 @@ async function pollManagerLogs() {
   } catch(e) {}
 }
 
+function fmtDuration(s) {
+  if (s < 60) return s + 's';
+  const m = Math.floor(s / 60), r = s % 60;
+  return m + 'm ' + r + 's';
+}
+
+function renderAutopilotResult(result) {
+  const card = document.getElementById('apResultCard');
+  if (!result) { if (card) card.style.display = 'none'; return; }
+  if (card) card.style.display = 'block';
+
+  const statusEl = document.getElementById('apResultStatus');
+  if (statusEl) statusEl.textContent = result.status || '';
+
+  // Summary stats
+  const summaryEl = document.getElementById('apResultSummary');
+  const pnl = result.cumulative_profit || 0;
+  const pnlColor = pnl >= 0 ? 'var(--green-light)' : 'var(--red-light)';
+  const pnlSign = pnl >= 0 ? '+' : '';
+  if (summaryEl) summaryEl.style.display = 'grid';
+  const el = id => document.getElementById(id);
+  if (el('apResTotalPnl')) { el('apResTotalPnl').textContent = `${pnlSign}$${pnl.toFixed(2)}`; el('apResTotalPnl').style.color = pnlColor; }
+  if (el('apResSprints')) el('apResSprints').textContent = result.sprints_completed || 0;
+  if (el('apResWr')) el('apResWr').textContent = result.overall_win_rate !== undefined ? (result.overall_win_rate * 100).toFixed(1) + '%' : '—';
+  if (el('apResTrades')) el('apResTrades').textContent = (result.total_wins || 0) + 'W / ' + (result.total_losses || 0) + 'L';
+
+  // Progress bar
+  const progressWrap = el('apResProgressWrap');
+  if (progressWrap) {
+    progressWrap.style.display = 'block';
+    const pct = Math.min(100, Math.max(0, (pnl / (result.max_daily_profit || 100)) * 100));
+    if (el('apResProgressBar')) el('apResProgressBar').style.width = pct.toFixed(1) + '%';
+    if (el('apResProgressLbl')) el('apResProgressLbl').textContent = `$${pnl.toFixed(2)} / $${(result.max_daily_profit || 0).toFixed(2)}`;
+  }
+
+  // Sprint table
+  const sprints = result.sprints || [];
+  const tableWrap = el('apResTableWrap');
+  const emptyEl = el('apResEmpty');
+  const tbody = el('apResTableBody');
+  if (!sprints.length) {
+    if (tableWrap) tableWrap.style.display = 'none';
+    if (emptyEl) emptyEl.style.display = 'block';
+    return;
+  }
+  if (tableWrap) tableWrap.style.display = 'block';
+  if (emptyEl) emptyEl.style.display = 'none';
+  if (!tbody) return;
+
+  tbody.innerHTML = [...sprints].reverse().map(s => {
+    const net = s.net_pnl || 0;
+    const netColor = net >= 0 ? 'var(--green-light)' : 'var(--red-light)';
+    const netSign = net >= 0 ? '+' : '';
+    const cumColor = (s.cumulative_after || 0) >= 0 ? 'var(--green-light)' : 'var(--red-light)';
+    const cumSign = (s.cumulative_after || 0) >= 0 ? '+' : '';
+    const wr = s.win_rate !== undefined ? (s.win_rate * 100).toFixed(0) + '%' : '—';
+    const started = s.started_at ? new Date(s.started_at * 1000).toLocaleTimeString() : '—';
+    return `<tr style="border-bottom:1px solid var(--border)">
+      <td style="padding:4px 6px;color:var(--text3)">#${s.sprint}</td>
+      <td style="padding:4px 6px;font-family:var(--mono);font-weight:600">${s.algo}</td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono)">$${(s.base_stake||0).toFixed(2)}</td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono);color:var(--green-light)">+$${(s.tp||0).toFixed(2)}</td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono);color:var(--red-light)">$${(s.sl||0).toFixed(2)}</td>
+      <td style="padding:4px 6px;text-align:right">${s.trades||0}</td>
+      <td style="padding:4px 6px;text-align:right">${s.wins||0}/${s.losses||0}</td>
+      <td style="padding:4px 6px;text-align:right">${wr}</td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono);font-weight:600;color:${netColor}">${netSign}$${net.toFixed(2)}</td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono);color:${cumColor}">${cumSign}$${(s.cumulative_after||0).toFixed(2)}</td>
+      <td style="padding:4px 6px;text-align:right;color:var(--text3)">${fmtDuration(s.duration_s||0)}</td>
+    </tr>`;
+  }).join('');
+}
+
 let apPollTimer = null;
 async function pollAutopilotStatus() {
   try {
@@ -3547,6 +3684,8 @@ async function pollAutopilotStatus() {
     const startBtn = document.getElementById('apStartBtn');
     const stopBtn = document.getElementById('apStopBtn');
     
+    renderAutopilotResult(d.result);
+
     if (d.running) {
       dot.className = 'sse-dot on';
 
