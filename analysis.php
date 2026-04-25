@@ -777,7 +777,7 @@ if (isset($_GET['api'])) {
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
   /* Primary palette */
-  --bg: transparent;
+  --bg: #0a0f14;
   --surface: rgba(15, 23, 42, 0.7);
   --surface2: rgba(30, 41, 59, 0.7);
   --surface3: rgba(51, 65, 85, 0.7);
@@ -1189,6 +1189,8 @@ canvas{width:100%!important}
 .modal-box p{font-size:.83rem;color:var(--text2);line-height:1.55;margin-bottom:20px}
 .modal-actions{display:flex;gap:10px;justify-content:flex-end}
 
+.ap-res-sum{display:grid;grid-template-columns:repeat(4,1fr)}
+
 /* Responsive */
 .mobile-nav-btn { display: none; background: transparent; border: none; color: var(--text); font-size: 1.5rem; cursor: pointer; padding: 0; line-height: 1; }
 .sidebar-overlay { display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5); z-index: 90; }
@@ -1200,6 +1202,8 @@ canvas{width:100%!important}
   .mobile-nav-btn { display: block; margin-right: 10px; }
   
   .stat-row{grid-template-columns:1fr 1fr}
+  .form-grid{grid-template-columns:1fr}
+  .ap-res-sum{grid-template-columns:1fr 1fr}
   .content{padding:10px}
   .tab-content{padding:14px 12px; margin-bottom:12px; border-radius:var(--radius-sm)}
   .chart-row{grid-template-columns:1fr}
@@ -1724,7 +1728,7 @@ canvas{width:100%!important}
             <div class="card-body" style="padding:14px">
               <div id="apSessionStarted" style="font-size:.68rem;color:var(--text3);margin-bottom:10px"></div>
               <!-- Summary row -->
-              <div id="apResultSummary" style="display:none;margin-bottom:12px;display:grid;grid-template-columns:repeat(4,1fr);gap:8px">
+              <div id="apResultSummary" class="ap-res-sum" style="display:none;margin-bottom:12px;gap:8px">
                 <div style="background:var(--surface2);border-radius:var(--radius-sm);padding:8px;text-align:center">
                   <div style="font-size:.65rem;color:var(--text3);margin-bottom:2px">Total P&amp;L</div>
                   <div id="apResTotalPnl" style="font-size:1.1rem;font-weight:700;font-family:var(--mono)">—</div>
