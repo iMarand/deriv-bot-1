@@ -772,6 +772,7 @@ if (isset($_GET['api'])) {
 <title>Deriv Bot Dashboard</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&family=IBM+Plex+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -812,11 +813,11 @@ if (isset($_GET['api'])) {
   --purple-bg:#faf5ff;
 
   /* Sidebar */
-  --sidebar-bg:#1a365d;
+  --sidebar-bg:#0f172a;
   --sidebar-text:#e2e8f0;
-  --sidebar-text2:#a0aec0;
-  --sidebar-active:#2b6cb0;
-  --sidebar-hover:#2a4a7f;
+  --sidebar-text2:#94a3b8;
+  --sidebar-active:#1e293b;
+  --sidebar-hover:#334155;
 
   --font:'Plus Jakarta Sans',sans-serif;
   --mono:'IBM Plex Mono',monospace;
@@ -1210,32 +1211,32 @@ canvas{width:100%!important}
   </div>
   <div class="sidebar-section">Analytics</div>
   <div class="sidebar-item active" data-tab="analytics" onclick="switchTab('analytics',this)">
-    <span class="si-icon">📊</span> Sessions
+    <span class="si-icon"><i class="bi bi-bar-chart-fill"></i></span> Sessions
     <span class="si-badge" id="sessCount">0</span>
   </div>
   <div class="sidebar-item" data-tab="summary" onclick="switchTab('summary',this)">
-    <span class="si-icon">📈</span> Summary
+    <span class="si-icon"><i class="bi bi-graph-up-arrow"></i></span> Summary
   </div>
   <div class="sidebar-section">Bot</div>
   <div class="sidebar-item" data-tab="control" onclick="switchTab('control',this)">
-    <span class="si-icon">🤖</span> Bot Control
+    <span class="si-icon"><i class="bi bi-robot"></i></span> Bot Control
     <span class="si-dot off" id="sidebarBotDot"></span>
   </div>
   <div class="sidebar-item" data-tab="autopilot" onclick="switchTab('autopilot',this)">
-    <span class="si-icon">🚀</span> Autopilot
+    <span class="si-icon"><i class="bi bi-rocket-takeoff-fill"></i></span> Autopilot
   </div>
   <div class="sidebar-section">Intelligence</div>
   <div class="sidebar-item" data-tab="training" onclick="switchTab('training',this)">
-    <span class="si-icon">🧠</span> ML Training
+    <span class="si-icon"><i class="bi bi-cpu-fill"></i></span> ML Training
     <span class="si-dot off" id="sidebarMlDot"></span>
   </div>
   <div class="sidebar-item" data-tab="scanner" onclick="switchTab('scanner',this)">
-    <span class="si-icon">🔍</span> Market Scanner
+    <span class="si-icon"><i class="bi bi-search"></i></span> Market Scanner
     <span class="si-dot off" id="sidebarDaemonDot"></span>
   </div>
   <div class="sidebar-section">Tournament</div>
   <div class="sidebar-item" data-tab="benchmark" onclick="switchTab('benchmark',this)">
-    <span class="si-icon">⚔️</span> Benchmark
+    <span class="si-icon"><i class="bi bi-trophy-fill"></i></span> Benchmark
     <span class="si-dot off" id="sidebarBenchDot"></span>
   </div>
   <div class="sidebar-footer">
