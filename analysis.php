@@ -1200,7 +1200,8 @@ canvas{width:100%!important}
   .mobile-nav-btn { display: block; margin-right: 10px; }
   
   .stat-row{grid-template-columns:1fr 1fr}
-  .content{padding:16px}
+  .content{padding:10px}
+  .tab-content{padding:14px 12px; margin-bottom:12px; border-radius:var(--radius-sm)}
   .chart-row{grid-template-columns:1fr}
   
   .topbar { padding: 12px 16px; flex-wrap: wrap; gap: 10px; }
