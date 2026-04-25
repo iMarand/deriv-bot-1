@@ -166,12 +166,13 @@ if (isset($_GET['api'])) {
 
     if ($_GET['api'] === 'bot_status') {
         $out = []; $code = -1;
-        exec("tmux has-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1", $out, $code);
+        // Use exact match (=name) so 'bbot' does NOT match 'bbot-autopilot' or 'bbot-benchmark'.
+        exec("tmux has-session -t =" . escapeshellarg($TMUX_NAME) . " 2>&1", $out, $code);
         $running = $code === 0;
         $logs = '';
         if ($running) {
             $logOut = [];
-            exec("tmux capture-pane -t " . escapeshellarg($TMUX_NAME) . " -p -S -100 2>&1", $logOut);
+            exec("tmux capture-pane -t =" . escapeshellarg($TMUX_NAME) . " -p -S -100 2>&1", $logOut);
             $logs = implode("\n", $logOut);
         }
         echo json_encode(['running'=>$running,'tmux'=>$TMUX_NAME,'logs'=>$logs]);
@@ -257,7 +258,7 @@ if (isset($_GET['api'])) {
         exec($tmuxCmd, $tmuxOut, $tmuxRet);
         sleep(2);
         $v=[]; $vc=-1;
-        exec("tmux has-session -t " . escapeshellarg($TMUX_NAME) . " 2>&1", $v, $vc);
+        exec("tmux has-session -t =" . escapeshellarg($TMUX_NAME) . " 2>&1", $v, $vc);
         echo json_encode(['success'=>($vc===0),'command'=>$cmd,'tmux'=>$TMUX_NAME,'ret'=>$tmuxRet,'out'=>implode("\n",$tmuxOut)]);
         exit;
     }
@@ -273,20 +274,36 @@ if (isset($_GET['api'])) {
 
     if ($_GET['api'] === 'autopilot_start' && $_SERVER['REQUEST_METHOD'] === 'POST') {
         $body = json_decode(file_get_contents('php://input'), true) ?? [];
+        $allowed_default = ['adaptive', 'pulse', 'novaburst', 'ensemble', 'alphabloom'];
+        $allowed = $body['allowed_algos'] ?? $allowed_default;
+        if (!is_array($allowed) || count($allowed) === 0) $allowed = $allowed_default;
+
+        $sizing_mode = in_array($body['sizing_mode'] ?? '', ['oneshot','twoshot','conservative','random'])
+                       ? $body['sizing_mode'] : 'oneshot';
+
+        $ml_thr = isset($body['ml_threshold']) && $body['ml_threshold'] !== '' && $body['ml_threshold'] !== null
+                  ? floatval($body['ml_threshold']) : null;
+
         $cfg = [
             'max_daily_profit' => floatval($body['max_daily_profit'] ?? 100.0),
-            'stake_range' => [floatval($body['stake_min'] ?? 0.5), floatval($body['stake_max'] ?? 2.0)],
+            'stake_range' => [floatval($body['stake_min'] ?? 0.5), floatval($body['stake_max'] ?? 20.0)],
             'sprint_tp_range' => [floatval($body['tp_min'] ?? 5.0), floatval($body['tp_max'] ?? 15.0)],
             'sprint_sl_range' => [floatval($body['sl_min'] ?? -50.0), floatval($body['sl_max'] ?? -20.0)],
             'cooldown_win_minutes' => floatval($body['cooldown_win'] ?? 2.0),
             'cooldown_loss_minutes' => floatval($body['cooldown_loss'] ?? 5.0),
             'use_benchmark' => !empty($body['use_benchmark']),
             'benchmark_duration_minutes' => floatval($body['benchmark_duration'] ?? 5.0),
-            'allowed_algos' => $body['allowed_algos'] ?? ['adaptive', 'pulse', 'novaburst', 'aegis', 'ensemble', 'alphabloom'],
+            'allowed_algos' => $allowed,
+            'sizing_mode' => $sizing_mode,
+            'disable_kelly' => !empty($body['disable_kelly']),
+            'disable_risk' => !empty($body['disable_risk']),
+            'ml_filter' => !empty($body['ml_filter']),
+            'ml_threshold' => $ml_thr,
+            'trade_strategy' => $body['trade_strategy'] ?? 'even_odd',
             'token' => $body['token'] ?? '',
             'account_mode' => $body['mode'] ?? 'demo',
             'martingale' => floatval($body['martingale'] ?? 2.2),
-            'max_stake' => floatval($body['max_stake'] ?? 50.0)
+            'max_stake' => floatval($body['max_stake'] ?? 50.0),
         ];
         file_put_contents($DATA_DIR . '/autopilot_config.json', json_encode($cfg, JSON_PRETTY_PRINT));
         
@@ -558,7 +575,7 @@ if (isset($_GET['api'])) {
         $logs = '';
         if ($running) {
             $logOut = [];
-            exec("tmux capture-pane -t " . escapeshellarg($MGR_TMUX) . " -p -S -50 2>&1", $logOut);
+            exec("tmux capture-pane -t =" . escapeshellarg($MGR_TMUX) . " -p -S -50 2>&1", $logOut);
             $logs = implode("\n", $logOut);
         }
         
@@ -1524,12 +1541,22 @@ canvas{width:100%!important}
             <div class="card-header"><h3>🤖 Systematic Autopilot</h3></div>
             <div class="card-body">
               <div style="font-size:.75rem;color:var(--text3);margin-bottom:14px;line-height:1.5">
-                The Autopilot acts like a disciplined human trader. It runs the bot in short sprints, randomly selecting stakes and targets within your defined ranges. It uses the background scanner or demo benchmarks to automatically select the best algorithm. It pauses to cooldown after wins and losses, continuing until the daily profit goal is reached.
+                The Autopilot acts like a disciplined human trader. It runs the bot in short sprints and uses multi-source intelligence (recent autopilot history, optional demo benchmark, and the live market scanner) to pick the best algorithm — no more locking onto one. Stake sizing aims to hit the sprint TP in a single winning trade, with martingale fallback for misses. It cools down after each sprint (longer after losses) until your daily goal is reached.
               </div>
               <div class="form-grid">
                 <div class="form-group form-full">
                   <label>Max Daily Profit Goal ($)</label>
                   <input type="number" id="apMaxDaily" value="100" step="1" min="1">
+                </div>
+                <div class="form-group form-full">
+                  <label>Stake Sizing Mode</label>
+                  <select id="apSizingMode">
+                    <option value="oneshot" selected>One-shot — first win hits TP (stake ≈ TP / 0.95)</option>
+                    <option value="twoshot">Two-shot — 2 wins hit TP (half stake)</option>
+                    <option value="conservative">Conservative — ~4 wins to hit TP</option>
+                    <option value="random">Random — pick stake in [min, max] (legacy)</option>
+                  </select>
+                  <span class="hint">Stake is clamped into the [Min, Max] range below</span>
                 </div>
                 <div class="form-group">
                   <label>Min Stake ($)</label>
@@ -1537,7 +1564,7 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Max Stake ($)</label>
-                  <input type="number" id="apStakeMax" value="2.0" step="0.1" min="0.35">
+                  <input type="number" id="apStakeMax" value="20" step="0.1" min="0.35">
                 </div>
                 <div class="form-group">
                   <label>Sprint TP Min ($)</label>
@@ -1566,12 +1593,44 @@ canvas{width:100%!important}
                   <input type="number" id="apCdLoss" value="5" step="1" min="0">
                 </div>
               </div>
+
+              <!-- Allowed Algorithms (multi-select) -->
+              <div style="margin-top:14px">
+                <label style="font-size:.75rem;font-weight:600;color:var(--text2);display:block;margin-bottom:6px">Allowed Algorithms</label>
+                <div style="display:flex;flex-wrap:wrap;gap:5px" id="apAlgoChecklist">
+                  <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.73rem;font-weight:600;color:var(--text2)"><input type="checkbox" class="ap-algo" value="adaptive" checked style="accent-color:var(--blue-light)"> adaptive</label>
+                  <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.73rem;font-weight:600;color:var(--text2)"><input type="checkbox" class="ap-algo" value="pulse" checked style="accent-color:var(--blue-light)"> pulse</label>
+                  <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.73rem;font-weight:600;color:var(--text2)"><input type="checkbox" class="ap-algo" value="ensemble" checked style="accent-color:var(--blue-light)"> ensemble</label>
+                  <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.73rem;font-weight:600;color:var(--text2)"><input type="checkbox" class="ap-algo" value="novaburst" checked style="accent-color:var(--blue-light)"> novaburst</label>
+                  <label style="display:flex;align-items:center;gap:4px;padding:4px 10px;background:var(--surface2);border:1.5px solid var(--border);border-radius:20px;cursor:pointer;font-family:var(--mono);font-size:.73rem;font-weight:600;color:var(--text2)"><input type="checkbox" class="ap-algo" value="alphabloom" checked style="accent-color:var(--blue-light)"> alphabloom</label>
+                </div>
+                <span class="hint">Autopilot picks among the checked algorithms based on recent performance</span>
+              </div>
+
+              <!-- Toggles -->
               <div style="margin-top:14px;background:var(--surface2);border-radius:var(--radius-sm);padding:0 12px">
                 <div class="toggle-row">
                   <div><div class="toggle-label">Use Demo Benchmarks</div><div class="toggle-sub">Race algos for 5 mins before real sprints</div></div>
                   <label class="toggle"><input type="checkbox" id="apUseBench"><span class="toggle-slider"></span></label>
                 </div>
+                <div class="toggle-row">
+                  <div><div class="toggle-label">Disable Kelly Sizing</div><div class="toggle-sub">Base stake + martingale only (no Kelly fraction)</div></div>
+                  <label class="toggle"><input type="checkbox" id="apDisKelly" checked><span class="toggle-slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                  <div><div class="toggle-label">Disable Risk Engine</div><div class="toggle-sub">No cooldown / circuit breaker — let martingale run</div></div>
+                  <label class="toggle"><input type="checkbox" id="apDisRisk"><span class="toggle-slider"></span></label>
+                </div>
+                <div class="toggle-row">
+                  <div><div class="toggle-label">ML Filter</div><div class="toggle-sub">Gate trades by trained P(win) model</div></div>
+                  <label class="toggle"><input type="checkbox" id="apMlFilter" onchange="document.getElementById('apMlThrRow').style.display=this.checked?'block':'none'"><span class="toggle-slider"></span></label>
+                </div>
               </div>
+              <div id="apMlThrRow" style="margin-top:10px;display:none">
+                <label style="font-size:.7rem;color:var(--text3)">ML Threshold (blank = use trained default)</label>
+                <input type="number" id="apMlThreshold" placeholder="e.g. 0.55" step="0.01" min="0" max="1" style="width:100%">
+              </div>
+
               <div style="margin-top:14px">
                 <button class="btn btn-primary" id="apStartBtn" onclick="startAutopilot()" style="width:100%">🚀 Start Autopilot</button>
                 <button class="btn btn-danger" id="apStopBtn" onclick="stopAutopilot()" style="width:100%;display:none">⏹ Stop Autopilot</button>
@@ -2979,11 +3038,21 @@ async function startAutopilot() {
   const btn = document.getElementById('apStartBtn');
   btn.disabled = true;
   btn.innerHTML = '<div class="spinner" style="margin-right:6px"></div> Starting...';
-  
+
+  const allowedAlgos = Array.from(document.querySelectorAll('.ap-algo'))
+    .filter(c => c.checked).map(c => c.value);
+  if (allowedAlgos.length === 0) {
+    alert('Select at least one algorithm for the autopilot to use.');
+    btn.disabled = false;
+    btn.innerHTML = '🚀 Start Autopilot';
+    return;
+  }
+
+  const mlThrRaw = document.getElementById('apMlThreshold').value.trim();
   const params = {
     max_daily_profit: parseFloat(document.getElementById('apMaxDaily').value) || 100,
     stake_min: parseFloat(document.getElementById('apStakeMin').value) || 0.5,
-    stake_max: parseFloat(document.getElementById('apStakeMax').value) || 2.0,
+    stake_max: parseFloat(document.getElementById('apStakeMax').value) || 20.0,
     tp_min: parseFloat(document.getElementById('apTpMin').value) || 5.0,
     tp_max: parseFloat(document.getElementById('apTpMax').value) || 15.0,
     sl_min: parseFloat(document.getElementById('apSlMin').value) || -50.0,
@@ -2992,12 +3061,25 @@ async function startAutopilot() {
     cooldown_loss: parseFloat(document.getElementById('apCdLoss').value) || 5.0,
     use_benchmark: document.getElementById('apUseBench').checked,
     benchmark_duration: 5.0,
+    sizing_mode: document.getElementById('apSizingMode').value,
+    disable_kelly: document.getElementById('apDisKelly').checked,
+    disable_risk: document.getElementById('apDisRisk').checked,
+    ml_filter: document.getElementById('apMlFilter').checked,
+    ml_threshold: mlThrRaw === '' ? null : parseFloat(mlThrRaw),
+    allowed_algos: allowedAlgos,
     token: document.getElementById('fToken').value.trim() || 'gY5gbEpJVhih5NL',
     mode: currentMode,
     martingale: parseFloat(document.getElementById('fMartingale').value) || 2.2,
     max_stake: parseFloat(document.getElementById('fMaxStake').value) || 50.0,
-    allowed_algos: ['adaptive', 'pulse', 'novaburst', 'aegis', 'ensemble', 'alphabloom']
+    trade_strategy: document.getElementById('fTradeStrategy') ? document.getElementById('fTradeStrategy').value : 'even_odd'
   };
+
+  // Reset autopilot log panel so the new run shows fresh output.
+  const apLog = document.getElementById('apLogOutput');
+  if (apLog) {
+    apLog.className = 'log-output empty';
+    apLog.textContent = 'Starting autopilot...';
+  }
 
   try {
     const res = await apiPost('?api=autopilot_start', params);
@@ -3009,7 +3091,7 @@ async function startAutopilot() {
       alert('Failed to start Autopilot.');
     }
   } catch (e) { alert('Error: ' + e.message); }
-  
+
   btn.disabled = false;
   btn.innerHTML = '🚀 Start Autopilot';
 }
@@ -3467,31 +3549,38 @@ async function pollAutopilotStatus() {
     
     if (d.running) {
       dot.className = 'sse-dot on';
-      
+
       const s = d.state || {};
       const statusText = s.status || 'Running';
       const cumPnl = s.cumulative_profit !== undefined ? s.cumulative_profit.toFixed(2) : '0.00';
       const pnlColor = s.cumulative_profit >= 0 ? 'var(--green-light)' : 'var(--red-light)';
-      
+
       msg.innerHTML = `<span style="color:var(--text)">${statusText}</span> <span style="color:var(--text3)">|</span> PnL: <span style="color:${pnlColor}">$${cumPnl}</span>`;
-      
+
       startBtn.style.display = 'none';
       stopBtn.style.display = 'block';
-      
+
       if (d.logs && d.logs.trim()) {
         logEl.className = 'log-output';
         logEl.textContent = d.logs;
         logEl.scrollTop = logEl.scrollHeight;
+      } else {
+        logEl.className = 'log-output empty';
+        logEl.textContent = 'Autopilot is starting up...';
       }
-      
+
       if (!apPollTimer) apPollTimer = setInterval(pollAutopilotStatus, 2000);
     } else {
       dot.className = 'sse-dot off';
       msg.textContent = 'Disconnected';
-      
+
       startBtn.style.display = 'block';
       stopBtn.style.display = 'none';
-      
+
+      // Clear the autopilot log panel so old logs from a prior run don't linger.
+      logEl.className = 'log-output empty';
+      logEl.textContent = 'Waiting for autopilot...';
+
       if (apPollTimer) { clearInterval(apPollTimer); apPollTimer = null; }
     }
   } catch(e) {}
