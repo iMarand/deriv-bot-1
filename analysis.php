@@ -19,7 +19,7 @@ if (isset($_GET['api'])) {
         usort($files, fn($a, $b) => filemtime($b) <=> filemtime($a));
         
         $offset = isset($_GET['offset']) ? intval($_GET['offset']) : 0;
-        $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 10;
+        $limit = isset($_GET['limit']) ? intval($_GET['limit']) : 20;
         $slice = array_slice($files, $offset, $limit);
 
         $sessions = [];
@@ -887,7 +887,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 .card-body{padding:20px}
 
 /* ── SESSION LIST ── */
-.sessions-scroll{display:flex;gap:12px;overflow-x:auto;padding-bottom:8px;margin-bottom:24px}
+.sessions-scroll{display:flex;gap:20px;overflow-x:auto;padding-bottom:8px;margin-bottom:24px}
 .sessions-scroll::-webkit-scrollbar{height:4px}
 .sessions-scroll::-webkit-scrollbar-thumb{background:var(--border2);border-radius:2px}
 .session-card{flex:0 0 260px;background:var(--surface);border:1.5px solid var(--border);border-radius:var(--radius);padding:14px 16px;cursor:pointer;transition:all .15s;position:relative}
@@ -1295,7 +1295,7 @@ canvas{width:100%!important}
         <div class="config-info" id="configBar"></div>
 
         <!-- Stats -->
-        <div class="stat-row" id="statsRow"></div>
+        <div class="config-info" id="statsRow"></div>
 
         <!-- Charts: Equity + Stake + Win/Loss donut -->
         <div class="chart-row" id="chartRow">
@@ -2427,7 +2427,7 @@ async function pollBgStatus() {
 
 // ─── INIT ─────────────────────────────────────────────────────────────────────
 let sessionsOffset = 0;
-let sessionsLimit = 10;
+let sessionsLimit = 20;
 let loadingSessions = false;
 let allSessionsLoaded = false;
 
@@ -2747,41 +2747,35 @@ function renderDashboard(silent = false) {
   const eqColor = eqChange>=0?'var(--green-light)':'var(--red-light)';
 
   document.getElementById('statsRow').innerHTML = `
-    <div class="stat-card ${netPnl>=0?'green':'red'}">
-      <div class="label">Net P&amp;L</div>
-      <div class="value" style="color:${pnlColor}">${netPnl>=0?'+':''}$${netPnl.toFixed(2)}</div>
-      <div class="sub">${totalTrades} trades total</div>
-      <div class="icon">${netPnl>=0?'📈':'📉'}</div>
+    <div class="ci-item">
+      <div class="k" style="display:flex;justify-content:space-between">Net P&amp;L <span>${netPnl>=0?'📈':'📉'}</span></div>
+      <div class="v" style="color:${pnlColor};font-size:1.3rem;margin-top:4px">${netPnl>=0?'+':''}$${netPnl.toFixed(2)}</div>
+      <div style="font-size:.68rem;color:var(--text3);margin-top:4px">${totalTrades} trades total</div>
     </div>
-    <div class="stat-card blue">
-      <div class="label">Win Rate</div>
-      <div class="value">${wr.toFixed(1)}%</div>
-      <div class="sub">${tradeWins.length}W / ${tradeLosses.length}L</div>
-      <div class="icon">🎯</div>
+    <div class="ci-item">
+      <div class="k" style="display:flex;justify-content:space-between">Win Rate <span>🎯</span></div>
+      <div class="v" style="font-size:1.3rem;margin-top:4px">${wr.toFixed(1)}%</div>
+      <div style="font-size:.68rem;color:var(--text3);margin-top:4px">${tradeWins.length}W / ${tradeLosses.length}L</div>
     </div>
-    <div class="stat-card teal">
-      <div class="label">Equity</div>
-      <div class="value">$${curEq.toFixed(2)}</div>
-      <div class="sub" style="color:${eqColor}">${eqChange>=0?'+':''}$${eqChange.toFixed(2)}</div>
-      <div class="icon">💰</div>
+    <div class="ci-item">
+      <div class="k" style="display:flex;justify-content:space-between">Equity <span>💰</span></div>
+      <div class="v" style="font-size:1.3rem;margin-top:4px">$${curEq.toFixed(2)}</div>
+      <div style="font-size:.68rem;color:${eqColor};margin-top:4px">${eqChange>=0?'+':''}$${eqChange.toFixed(2)}</div>
     </div>
-    <div class="stat-card green">
-      <div class="label">Peak Equity</div>
-      <div class="value">$${runPeak.toFixed(2)}</div>
-      <div class="sub">+$${(runPeak-initEq).toFixed(2)} from start</div>
-      <div class="icon">🏆</div>
+    <div class="ci-item">
+      <div class="k" style="display:flex;justify-content:space-between">Peak Equity <span>🏆</span></div>
+      <div class="v" style="font-size:1.3rem;margin-top:4px">$${runPeak.toFixed(2)}</div>
+      <div style="font-size:.68rem;color:var(--text3);margin-top:4px">+$${(runPeak-initEq).toFixed(2)} from start</div>
     </div>
-    <div class="stat-card red">
-      <div class="label">Max Drawdown</div>
-      <div class="value">-$${maxDD.toFixed(2)}</div>
-      <div class="sub">${initEq>0?((maxDD/initEq)*100).toFixed(1):0}% of initial</div>
-      <div class="icon">⚠️</div>
+    <div class="ci-item">
+      <div class="k" style="display:flex;justify-content:space-between">Max Drawdown <span>⚠️</span></div>
+      <div class="v" style="font-size:1.3rem;color:var(--red-light);margin-top:4px">-$${maxDD.toFixed(2)}</div>
+      <div style="font-size:.68rem;color:var(--text3);margin-top:4px">${initEq>0?((maxDD/initEq)*100).toFixed(1):0}% of initial</div>
     </div>
-    <div class="stat-card purple">
-      <div class="label">Best / Worst Streak</div>
-      <div class="value" style="font-size:1rem">${maxWinStreak}W / ${maxLossStreak}L</div>
-      <div class="sub"><span style="color:var(--green-light)">+$${maxWinPnl.toFixed(2)}</span> <span style="color:var(--text4)">|</span> <span style="color:var(--red-light)">-$${Math.abs(maxLossPnl).toFixed(2)}</span></div>
-      <div class="icon">⚡</div>
+    <div class="ci-item">
+      <div class="k" style="display:flex;justify-content:space-between">Best / Worst Streak <span>⚡</span></div>
+      <div class="v" style="font-size:1.1rem;margin-top:4px">${maxWinStreak}W / ${maxLossStreak}L</div>
+      <div style="font-size:.68rem;margin-top:4px"><span style="color:var(--green-light)">+$${maxWinPnl.toFixed(2)}</span> <span style="color:var(--text4)">|</span> <span style="color:var(--red-light)">-$${Math.abs(maxLossPnl).toFixed(2)}</span></div>
     </div>
   `;
 
