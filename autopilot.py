@@ -519,11 +519,38 @@ def main() -> None:
         # ── Resolve sprint result ──
         sprint_net = 0.0
         trades = wins = 0
+        max_win_streak = 0
+        max_loss_streak = 0
+        max_drawdown = 0.0
+        max_profit_streak = 0.0
+        
         sd = load_json(app_json)
         if sd and "summary" in sd:
             sprint_net = float(sd["summary"].get("net_pnl", 0.0))
             trades = int(sd["summary"].get("trade_count", 0))
             wins = int(sd["summary"].get("wins", 0))
+            
+        if sd and "equity_curve" in sd:
+            cur_w = 0
+            cur_l = 0
+            cum = 0.0
+            for t in sd["equity_curve"]:
+                res = t.get("result")
+                profit = float(t.get("profit", 0.0))
+                if profit != 0.0 or res is not None:
+                    cum += profit
+                    if cum < max_drawdown: max_drawdown = cum
+                    if cum > max_profit_streak: max_profit_streak = cum
+                    
+                if res == "win":
+                    cur_w += 1
+                    cur_l = 0
+                    if cur_w > max_win_streak: max_win_streak = cur_w
+                elif res == "loss":
+                    cur_l += 1
+                    cur_w = 0
+                    if cur_l > max_loss_streak: max_loss_streak = cur_l
+
         losses = trades - wins
         wr = round(wins / trades, 4) if trades > 0 else 0.0
         duration_s = int(sprint_ended_at - sprint_started_at)
@@ -557,6 +584,10 @@ def main() -> None:
             "win_rate": wr,
             "net_pnl": round(sprint_net, 2),
             "cumulative_after": round(cumulative_profit, 2),
+            "max_win_streak": max_win_streak,
+            "max_loss_streak": max_loss_streak,
+            "max_drawdown": round(max_drawdown, 2),
+            "max_profit": round(max_profit_streak, 2),
         })
 
         write_json(RESULT_FILE, {

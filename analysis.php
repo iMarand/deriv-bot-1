@@ -1738,6 +1738,8 @@ canvas{width:100%!important}
                       <th style="padding:4px 6px;text-align:right">Trades</th>
                       <th style="padding:4px 6px;text-align:right">W/L</th>
                       <th style="padding:4px 6px;text-align:right">WR%</th>
+                      <th style="padding:4px 6px;text-align:right">Max W/L Strk</th>
+                      <th style="padding:4px 6px;text-align:right">Max Profit/DD</th>
                       <th style="padding:4px 6px;text-align:right">Net P&amp;L</th>
                       <th style="padding:4px 6px;text-align:right">Cumulative</th>
                       <th style="padding:4px 6px;text-align:right">Duration</th>
@@ -3685,16 +3687,55 @@ function renderAutopilotResult(result) {
   const tableWrap = el('apResTableWrap');
   const emptyEl = el('apResEmpty');
   const tbody = el('apResTableBody');
+  const filtersEl = el('apResFilters');
+  
   if (!sprints.length) {
     if (tableWrap) tableWrap.style.display = 'none';
     if (emptyEl) emptyEl.style.display = 'block';
+    if (filtersEl) filtersEl.style.display = 'none';
     return;
   }
   if (tableWrap) tableWrap.style.display = 'block';
   if (emptyEl) emptyEl.style.display = 'none';
+  if (filtersEl) filtersEl.style.display = 'flex';
   if (!tbody) return;
 
-  tbody.innerHTML = [...sprints].reverse().map(s => {
+  // Store globally for filtering
+  window.lastApResult = result;
+
+  // Update algo filter dropdown
+  const algoSel = el('apFiltAlgo');
+  if (algoSel) {
+    const algos = [...new Set(sprints.map(s => s.algo))];
+    const curr = algoSel.value;
+    algoSel.innerHTML = '<option value="">All algos</option>' + algos.map(a => `<option value="${a}">${a}</option>`).join('');
+    algoSel.value = algos.includes(curr) ? curr : '';
+  }
+
+  // Filter sprints
+  const fAlgo = el('apFiltAlgo')?.value || '';
+  const fOut = el('apFiltOutcome')?.value || '';
+  const fMinT = parseInt(el('apFiltMinTrades')?.value) || 0;
+  const fMinL = parseInt(el('apFiltMinLoss')?.value) || 0;
+
+  const filtered = [...sprints].reverse().filter(s => {
+    if (fAlgo && s.algo !== fAlgo) return false;
+    if (fOut === 'win' && s.net_pnl <= 0) return false;
+    if (fOut === 'loss' && s.net_pnl > 0) return false;
+    if (s.trades < fMinT) return false;
+    if ((s.max_loss_streak || 0) < fMinL) return false;
+    return true;
+  });
+
+  const countEl = el('apFiltCount');
+  if (countEl) countEl.textContent = `Showing ${filtered.length} of ${sprints.length}`;
+
+  if (!filtered.length) {
+    tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;padding:12px;color:var(--text3)">No sprints match filters.</td></tr>';
+    return;
+  }
+
+  tbody.innerHTML = filtered.map(s => {
     const net = s.net_pnl || 0;
     const netColor = net >= 0 ? 'var(--green-light)' : 'var(--red-light)';
     const netSign = net >= 0 ? '+' : '';
@@ -3702,6 +3743,11 @@ function renderAutopilotResult(result) {
     const cumSign = (s.cumulative_after || 0) >= 0 ? '+' : '';
     const wr = s.win_rate !== undefined ? (s.win_rate * 100).toFixed(0) + '%' : '—';
     const started = s.started_at ? new Date(s.started_at * 1000).toLocaleTimeString() : '—';
+    const maxW = s.max_win_streak || 0;
+    const maxL = s.max_loss_streak || 0;
+    const maxProf = s.max_profit || 0;
+    const maxDD = s.max_drawdown || 0;
+    
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:4px 6px;color:var(--text3)">#${s.sprint}</td>
       <td style="padding:4px 6px;font-family:var(--mono);font-size:.68rem;color:var(--text3)">${started}</td>
@@ -3712,11 +3758,25 @@ function renderAutopilotResult(result) {
       <td style="padding:4px 6px;text-align:right">${s.trades||0}</td>
       <td style="padding:4px 6px;text-align:right">${s.wins||0}/${s.losses||0}</td>
       <td style="padding:4px 6px;text-align:right">${wr}</td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono)"><span style="color:var(--green-light)">${maxW}</span>/<span style="color:var(--red-light)">${maxL}</span></td>
+      <td style="padding:4px 6px;text-align:right;font-family:var(--mono)"><span style="color:var(--green-light)">$${maxProf.toFixed(2)}</span> / <span style="color:var(--red-light)">$${maxDD.toFixed(2)}</span></td>
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono);font-weight:600;color:${netColor}">${netSign}$${net.toFixed(2)}</td>
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono);color:${cumColor}">${cumSign}$${(s.cumulative_after||0).toFixed(2)}</td>
       <td style="padding:4px 6px;text-align:right;color:var(--text3)">${fmtDuration(s.duration_s||0)}</td>
     </tr>`;
   }).join('');
+}
+
+function applySprintFilters() {
+  if (window.lastApResult) renderAutopilotResult(window.lastApResult);
+}
+
+function resetSprintFilters() {
+  if(document.getElementById('apFiltAlgo')) document.getElementById('apFiltAlgo').value = '';
+  if(document.getElementById('apFiltOutcome')) document.getElementById('apFiltOutcome').value = '';
+  if(document.getElementById('apFiltMinTrades')) document.getElementById('apFiltMinTrades').value = '0';
+  if(document.getElementById('apFiltMinLoss')) document.getElementById('apFiltMinLoss').value = '0';
+  applySprintFilters();
 }
 
 let apPollTimer = null;
