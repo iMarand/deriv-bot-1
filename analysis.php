@@ -3691,6 +3691,7 @@ function renderAutopilotResult(result) {
     const started = s.started_at ? new Date(s.started_at * 1000).toLocaleTimeString() : '—';
     return `<tr style="border-bottom:1px solid var(--border)">
       <td style="padding:4px 6px;color:var(--text3)">#${s.sprint}</td>
+      <td style="padding:4px 6px;font-family:var(--mono);font-size:.68rem;color:var(--text3)">${started}</td>
       <td style="padding:4px 6px;font-family:var(--mono);font-weight:600">${s.algo}</td>
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono)">$${(s.base_stake||0).toFixed(2)}</td>
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono);color:var(--green-light)">+$${(s.tp||0).toFixed(2)}</td>
