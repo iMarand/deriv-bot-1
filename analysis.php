@@ -1563,7 +1563,7 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Min Stake ($)</label>
-                  <input type="number" id="apStakeMin" value="0.5" step="0.1" min="0.35">
+                  <input type="number" id="apStakeMin" value="0.5" step="0.1" min="0.35" oninput="updateApHint()">
                 </div>
                 <div class="form-group">
                   <label>Max Stake ($)</label>
@@ -1597,11 +1597,12 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Martingale Multiplier</label>
-                  <input type="number" id="apMartingale" value="2.2" step="0.1" min="1.1" max="10">
+                  <input type="number" id="apMartingale" value="2.2" step="0.1" min="1.1" max="10" oninput="updateApHint()">
                 </div>
                 <div class="form-group">
                   <label>Max Stake per Trade ($)</label>
-                  <input type="number" id="apMaxStake" value="50" step="1" min="1">
+                  <input type="number" id="apMaxStake" value="50" step="1" min="1" oninput="updateApHint()">
+                  <span class="hint" id="hapMaxStake">Covers up to 5 consecutive losses</span>
                 </div>
               </div>
 
@@ -3098,6 +3099,18 @@ function updateCmd() {
   document.getElementById('cmdPreview').innerHTML = cmd;
 }
 
+function updateApHint() {
+  const maxStake = parseFloat(document.getElementById('apMaxStake').value) || 50.0;
+  const minStake = parseFloat(document.getElementById('apStakeMin').value) || 0.5;
+  const martingale = parseFloat(document.getElementById('apMartingale').value) || 2.2;
+  let hintLevels = '∞';
+  if (martingale > 1 && maxStake >= minStake) {
+    hintLevels = Math.floor(Math.log(maxStake / minStake) / Math.log(martingale));
+  }
+  const hintEl = document.getElementById('hapMaxStake');
+  if (hintEl) hintEl.textContent = `Covers up to ${hintLevels} consecutive losses`;
+}
+
 async function startBot() {
   const btn = document.getElementById('startBtn');
   btn.disabled = true;
@@ -4135,6 +4148,7 @@ function stopBenchLogPoll() {
 initSymChecklist();
 initBenchSymChecklist();
 onStrategyChange();
+updateApHint();
 init();
 refreshDaemonStatus();
 pollManagerLogs();
