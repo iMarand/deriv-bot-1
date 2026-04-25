@@ -1130,7 +1130,7 @@ canvas{width:100%!important}
 .section-head h3{font-size:.75rem;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--text3)}
 
 /* Tab content */
-.tab-content{display:none}
+.tab-content{display:none;background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);padding:24px 28px;box-shadow:var(--shadow);backdrop-filter:blur(12px);-webkit-backdrop-filter:blur(12px);margin-bottom:24px}
 .tab-content.active{display:block}
 
 /* Progress bar */
