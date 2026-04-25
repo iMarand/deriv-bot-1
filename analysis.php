@@ -824,9 +824,9 @@ if (isset($_GET['api'])) {
   --radius:12px;
   --radius-sm:8px;
   --radius-lg:16px;
-  --shadow:0 1px 3px rgba(0,0,0,.12),0 1px 2px rgba(0,0,0,.08);
-  --shadow-md:0 4px 12px rgba(0,0,0,.12),0 2px 4px rgba(0,0,0,.08);
-  --shadow-lg:0 10px 25px rgba(0,0,0,.15),0 4px 10px rgba(0,0,0,.1);
+  --shadow:0 1px 2px rgba(0,0,0,.04),0 1px 2px rgba(0,0,0,.03);
+  --shadow-md:0 2px 4px rgba(0,0,0,.04),0 1px 3px rgba(0,0,0,.03);
+  --shadow-lg:0 4px 10px rgba(0,0,0,.05),0 2px 4px rgba(0,0,0,.04);
 }
 
 html{font-size:14px}
@@ -851,7 +851,7 @@ body{background:var(--bg);color:var(--text);font-family:var(--font);min-height:1
 .sidebar-footer-text{font-size:.67rem;color:var(--sidebar-text2);line-height:1.5}
 
 /* ── MAIN ── */
-.main{flex:1;display:flex;flex-direction:column;overflow-x:hidden;min-width:0}
+.main{flex:1;display:flex;flex-direction:column;overflow-x:hidden;min-width:0;background-image:url("data:image/svg+xml,%3Csvg viewBox='0 0 1000 1000' xmlns='http://www.w3.org/2000/svg'%3E%3Cg fill='%23f1f5f9' opacity='0.7'%3E%3Cpath d='M756,664.5Q680,729,590,755.5Q500,782,408,758.5Q316,735,248,667.5Q180,600,165.5,502Q151,404,213,323.5Q275,243,387.5,214.5Q500,186,603.5,221.5Q707,257,769.5,340Q832,423,832,511.5Q832,600,756,664.5Z'/%3E%3Cpath d='M353,663Q256,726,177.5,648.5Q99,571,114.5,463Q130,355,226.5,282.5Q323,210,411.5,217.5Q500,225,595,217Q690,209,761,280Q832,351,827,456Q822,561,749,634Q676,707,563,710.5Q450,714,353,663Z' transform='translate(-100,-100)'/%3E%3Cpath d='M769,678Q706,756,603,770Q500,784,402,757Q304,730,227,656Q150,582,152,477Q154,372,238,296.5Q322,221,411,211Q500,201,600.5,214.5Q701,228,766.5,306Q832,384,832,492Q832,600,769,678Z' transform='translate(150,150)'/%3E%3C/g%3E%3C/svg%3E");background-attachment:fixed;background-size:cover;background-position:center}
 .topbar{background:var(--surface);border-bottom:1px solid var(--border);padding:14px 28px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
 .topbar-title{font-size:1.1rem;font-weight:700;color:var(--text)}
 .topbar-right{display:flex;align-items:center;gap:10px}
