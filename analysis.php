@@ -1563,11 +1563,11 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Min Stake ($)</label>
-                  <input type="number" id="apStakeMin" value="0.5" step="0.1" min="0.35" oninput="updateApHint()">
+                  <input type="number" id="apStakeMin" value="2" step="0.1" min="0.35" oninput="updateApHint()">
                 </div>
                 <div class="form-group">
                   <label>Max Stake ($)</label>
-                  <input type="number" id="apStakeMax" value="20" step="0.1" min="0.35">
+                  <input type="number" id="apStakeMax" value="5" step="0.1" min="0.35">
                 </div>
                 <div class="form-group">
                   <label>Sprint TP Min ($)</label>
@@ -1579,12 +1579,12 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Sprint SL Min ($)</label>
-                  <input type="number" id="apSlMin" value="-50" step="1" max="-1">
+                  <input type="number" id="apSlMin" value="-500" step="1" max="-1">
                   <span class="hint">Most negative</span>
                 </div>
                 <div class="form-group">
                   <label>Sprint SL Max ($)</label>
-                  <input type="number" id="apSlMax" value="-20" step="1" max="-1">
+                  <input type="number" id="apSlMax" value="-300" step="1" max="-1">
                   <span class="hint">Least negative</span>
                 </div>
                 <div class="form-group">
@@ -1597,12 +1597,12 @@ canvas{width:100%!important}
                 </div>
                 <div class="form-group">
                   <label>Martingale Multiplier</label>
-                  <input type="number" id="apMartingale" value="2.2" step="0.1" min="1.1" max="10" oninput="updateApHint()">
+                  <input type="number" id="apMartingale" value="2.13" step="0.01" min="1.1" max="10" oninput="updateApHint()">
                 </div>
                 <div class="form-group">
                   <label>Max Stake per Trade ($)</label>
-                  <input type="number" id="apMaxStake" value="50" step="1" min="1" oninput="updateApHint()">
-                  <span class="hint" id="hapMaxStake">Covers up to 5 consecutive losses</span>
+                  <input type="number" id="apMaxStake" value="200" step="1" min="1" oninput="updateApHint()">
+                  <span class="hint" id="hapMaxStake">Covers up to 6 consecutive losses</span>
                 </div>
               </div>
 
@@ -1741,7 +1741,6 @@ canvas{width:100%!important}
                       <th style="padding:4px 6px;text-align:right">Max W/L Strk</th>
                       <th style="padding:4px 6px;text-align:right">Max Profit/DD</th>
                       <th style="padding:4px 6px;text-align:right">Net P&amp;L</th>
-                      <th style="padding:4px 6px;text-align:right">Cumulative</th>
                       <th style="padding:4px 6px;text-align:right">Duration</th>
                     </tr>
                   </thead>
@@ -3761,7 +3760,6 @@ function renderAutopilotResult(result) {
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono)"><span style="color:var(--green-light)">${maxW}</span>/<span style="color:var(--red-light)">${maxL}</span></td>
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono)"><span style="color:var(--green-light)">$${maxProf.toFixed(2)}</span> / <span style="color:var(--red-light)">$${maxDD.toFixed(2)}</span></td>
       <td style="padding:4px 6px;text-align:right;font-family:var(--mono);font-weight:600;color:${netColor}">${netSign}$${net.toFixed(2)}</td>
-      <td style="padding:4px 6px;text-align:right;font-family:var(--mono);color:${cumColor}">${cumSign}$${(s.cumulative_after||0).toFixed(2)}</td>
       <td style="padding:4px 6px;text-align:right;color:var(--text3)">${fmtDuration(s.duration_s||0)}</td>
     </tr>`;
   }).join('');
