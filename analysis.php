@@ -4224,11 +4224,10 @@ function stopBenchLogPoll() {
 }
 
 
-// ─── BACKGROUND PARTICLES ───────────────────────────────────────────────────
+// ─── MATRIX TRADING BACKGROUND ──────────────────────────────────────────────
 const bgCanvas = document.getElementById('bgCanvas');
 const bgCtx = bgCanvas.getContext('2d');
-let bgParticles = [];
-const numParticles = window.innerWidth < 768 ? 20 : 45;
+let tradeStreams = [];
 
 function resizeBg() {
   bgCanvas.width = window.innerWidth - (window.innerWidth > 768 ? 220 : 0);
@@ -4237,57 +4236,49 @@ function resizeBg() {
 window.addEventListener('resize', resizeBg);
 resizeBg();
 
-class Particle {
+class TradeStream {
   constructor() {
-    this.x = Math.random() * bgCanvas.width;
-    this.y = Math.random() * bgCanvas.height;
-    this.r = Math.random() * 20 + 10;
-    this.vx = (Math.random() - 0.5) * 0.4;
-    this.vy = (Math.random() - 0.5) * 0.4;
+    this.reset(true);
   }
-  update() {
-    this.x += this.vx;
-    this.y += this.vy;
+  reset(randomY = false) {
+    this.x = Math.random() * bgCanvas.width;
+    this.y = randomY ? Math.random() * bgCanvas.height : -50;
+    this.speed = Math.random() * 2 + 0.5;
+    this.isBuy = Math.random() > 0.5;
     
-    // Wrap around
-    if (this.x < -50) this.x = bgCanvas.width + 50;
-    if (this.x > bgCanvas.width + 50) this.x = -50;
-    if (this.y < -50) this.y = bgCanvas.height + 50;
-    if (this.y > bgCanvas.height + 50) this.y = -50;
-    
-    // Dodging
-    for (let i = 0; i < bgParticles.length; i++) {
-      let p = bgParticles[i];
-      if (p === this) continue;
-      let dx = this.x - p.x;
-      let dy = this.y - p.y;
-      let dist = Math.sqrt(dx*dx + dy*dy);
-      if (dist < 100) {
-        this.vx += dx * 0.00005;
-        this.vy += dy * 0.00005;
-      }
+    // Generate random trading numeric string
+    if (Math.random() > 0.5) {
+      this.text = (this.isBuy ? "BUY " : "SELL ") + (Math.random() * 10).toFixed(4);
+    } else {
+      this.text = (this.isBuy ? "+" : "-") + (Math.random() * 100).toFixed(2);
     }
     
-    // Speed limit
-    let speed = Math.sqrt(this.vx*this.vx + this.vy*this.vy);
-    if (speed > 0.8) {
-      this.vx = (this.vx / speed) * 0.8;
-      this.vy = (this.vy / speed) * 0.8;
+    this.color = this.isBuy ? '#38a169' : '#e53e3e';
+  }
+  update() {
+    this.y += this.speed;
+    if (this.y > bgCanvas.height + 50) {
+      this.reset();
     }
   }
   draw() {
-    bgCtx.beginPath();
-    bgCtx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
-    bgCtx.fillStyle = '#f1f5f9'; // Very subtle slate color
-    bgCtx.fill();
+    bgCtx.fillStyle = this.color;
+    bgCtx.fillText(this.text, this.x, this.y);
   }
 }
 
-for (let i = 0; i < numParticles; i++) bgParticles.push(new Particle());
+// Number of streams based on screen width
+const numStreams = window.innerWidth < 768 ? 40 : 100;
+for (let i = 0; i < numStreams; i++) tradeStreams.push(new TradeStream());
 
 function animateBg() {
-  bgCtx.clearRect(0, 0, bgCanvas.width, bgCanvas.height);
-  bgParticles.forEach(p => { p.update(); p.draw(); });
+  // Blackish background with opacity for the trailing fade effect
+  bgCtx.fillStyle = 'rgba(10, 15, 20, 0.15)';
+  bgCtx.fillRect(0, 0, bgCanvas.width, bgCanvas.height);
+  
+  bgCtx.font = '12px "IBM Plex Mono", monospace';
+  tradeStreams.forEach(s => { s.update(); s.draw(); });
+  
   requestAnimationFrame(animateBg);
 }
 animateBg();
