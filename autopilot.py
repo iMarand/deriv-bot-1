@@ -530,11 +530,11 @@ def main() -> None:
             trades = int(sd["summary"].get("trade_count", 0))
             wins = int(sd["summary"].get("wins", 0))
             
-        if sd and "equity_curve" in sd:
+        if sd and "trades" in sd:
             cur_w = 0
             cur_l = 0
             cum = 0.0
-            for t in sd["equity_curve"]:
+            for t in sd["trades"]:
                 res = t.get("result")
                 profit = float(t.get("profit", 0.0))
                 if profit != 0.0 or res is not None:
