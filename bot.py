@@ -93,6 +93,7 @@ class DerivBot:
         hotness_tracker=None,
         vol_gate: Optional[VolatilityGate] = None,
         disable_hot_reload: bool = False,
+        adaptive_threshold: bool = False,
     ):
         self.token = token
         self.cfg = cfg or BotConfig()
@@ -129,6 +130,24 @@ class DerivBot:
         self.ml_filter = ml_filter
         self.hotness_tracker = hotness_tracker
         self.vol_gate = vol_gate
+
+        # ── Adaptive threshold escalation ──────────────────────────────
+        # After each consecutive loss the bot demands a higher signal
+        # quality before re-entering — mimicking a human getting more
+        # cautious.  Resets on any win.  The bonus curve is exponential
+        # so it ramps up steeply: +0.07, +0.15, +0.24, +0.34, …
+        self._adaptive_threshold_enabled: bool = adaptive_threshold
+        self._adaptive_base_bonus: float = 0.07    # bonus after 1st loss
+        self._adaptive_escalation: float = 1.08    # exponential growth per loss
+        # Post-loss re-evaluation delay: after a loss, skip this many
+        # ticks before accepting new signals.  Lets fresh data arrive so
+        # the algorithm doesn't re-enter on the same stale pattern that
+        # just lost.  Scales with consecutive losses.
+        self._post_loss_wait_ticks: int = 0
+        self._post_loss_base_delay: int = 8        # ticks after 1st loss
+        self._post_loss_delay_per_loss: int = 5     # extra ticks per additional loss
+        self._last_loss_symbol: Optional[str] = None  # track which symbol lost
+        self._last_loss_score: float = 0.0            # score that led to the loss
 
         # State
         self.equity: float = 0.0
@@ -236,10 +255,31 @@ class DerivBot:
     def _regime_ready(self, rd: RegimeDetector) -> bool:
         return (not self._regime_required()) or rd.current_regime != Regime.UNKNOWN
 
+    def _adaptive_threshold_bonus(self) -> float:
+        """Exponential threshold escalation based on consecutive losses.
+
+        Returns a bonus added to the base entry threshold.  The curve is:
+          loss 0 → 0.00   (trade at normal threshold)
+          loss 1 → 0.07   (slightly more cautious)
+          loss 2 → 0.15   (noticeably more cautious)
+          loss 3 → 0.24   (very cautious)
+          loss 4 → 0.34   (extremely selective)
+          loss 5+→ 0.45   (cap — beyond this almost nothing passes)
+        """
+        if not self._adaptive_threshold_enabled:
+            return 0.0
+        losses = self.martingale.consecutive_losses
+        if losses == 0:
+            return 0.0
+        raw = self._adaptive_base_bonus * (self._adaptive_escalation ** (losses - 1)) * losses
+        return min(raw, 0.45)  # cap so threshold never becomes unreachable
+
     def _direction_threshold(self, signal: SignalSnapshot) -> float:
         threshold = self.cfg.ensemble.entry_score_threshold
         if self.cfg.direction.even_priority and signal.direction == "ODD":
             threshold += self.cfg.direction.odd_extra_threshold
+        # Adaptive escalation: demand higher quality after consecutive losses
+        threshold += self._adaptive_threshold_bonus()
         return threshold
 
     def _direction_adjusted_score(self, signal: SignalSnapshot) -> float:
@@ -487,6 +527,19 @@ class DerivBot:
         # Don't trade if we already have an active contract
         if self.active_contract:
             self._set_symbol_status(symbol, f"waiting on active contract {self.active_contract}")
+            return None
+
+        # ── Post-loss re-evaluation delay ──────────────────────────────
+        # After a loss, wait for fresh ticks before accepting new signals.
+        # This prevents re-entering on the same stale pattern that just lost.
+        if self._post_loss_wait_ticks > 0:
+            self._post_loss_wait_ticks -= 1
+            bonus = self._adaptive_threshold_bonus()
+            self._set_symbol_status(
+                symbol,
+                f"re-evaluating after loss (wait {self._post_loss_wait_ticks} ticks, "
+                f"threshold +{bonus:.2f})",
+            )
             return None
 
         # Auto-Manager hot-reload filter
@@ -1162,6 +1215,42 @@ class DerivBot:
         self._last_trade_ts = time.time()  # update for adaptive idle bypass
         self._write_app_json()
 
+        # ── Adaptive threshold: post-loss re-evaluation delay ─────────
+        # After a loss, pause for extra ticks so the algorithm digests
+        # fresh data before deciding on the next entry.  On a win, reset.
+        if is_win:
+            if self._adaptive_threshold_enabled and self._last_loss_symbol is not None:
+                logger.info(
+                    "Adaptive threshold reset → base (was +%.2f after %d losses)",
+                    self._adaptive_threshold_bonus(),
+                    0,  # already reset by martingale.on_result
+                )
+            self._post_loss_wait_ticks = 0
+            self._last_loss_symbol = None
+            self._last_loss_score = 0.0
+        else:
+            losses = self.martingale.consecutive_losses
+            self._last_loss_symbol = symbol
+            self._last_loss_score = (
+                self._current_signal.composite_score if self._current_signal else 0.0
+            )
+            if self._adaptive_threshold_enabled:
+                # Scale delay with consecutive losses: 8 + 5*(losses-1) ticks
+                self._post_loss_wait_ticks = (
+                    self._post_loss_base_delay
+                    + self._post_loss_delay_per_loss * max(0, losses - 1)
+                )
+                new_bonus = self._adaptive_threshold_bonus()
+                logger.info(
+                    "Adaptive threshold escalated → +%.2f (total=%.2f) | "
+                    "re-eval delay=%d ticks | lost on %s (score=%.3f)",
+                    new_bonus,
+                    self.cfg.ensemble.entry_score_threshold + new_bonus,
+                    self._post_loss_wait_ticks,
+                    symbol,
+                    self._last_loss_score,
+                )
+
         icon = "WIN" if is_win else "LOSS"
         logger.info(
             "Trade #%s %s: %s on %s | stake=$%.2f | profit=$%+.2f | equity=$%.2f | consec_losses=%s",
@@ -1404,6 +1493,7 @@ class DerivBot:
                 logger.info("  Profit target: %s", f"${pt}" if pt is not None else "unlimited")
                 logger.info("  Loss limit:    %s", f"${ll}" if ll is not None else "unlimited")
                 logger.info(f"  Score threshold: {self.cfg.ensemble.entry_score_threshold:.3f}")
+                logger.info(f"  Adaptive threshold: {'ENABLED (escalates after losses)' if self._adaptive_threshold_enabled else 'disabled'}")
                 logger.info(
                     "  Even priority: %s",
                     (
@@ -1455,9 +1545,10 @@ class DerivBot:
             finally:
                 await self.close()
 
-        watch_task.cancel()
-        with contextlib.suppress(asyncio.CancelledError):
-            await watch_task
+        if watch_task is not None:
+            watch_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await watch_task
 
         logger.info("Bot shut down")
         self._write_app_json()
@@ -1627,6 +1718,12 @@ def main():
     parser.add_argument("--debug", action="store_true", help="Enable debug logging")
     parser.add_argument("--app-json", type=str, default=None, help="Override session output file path (default: auto-generated in data/)")
     parser.add_argument("--disable-hot-reload", action="store_true", help="Disable hot-reloading of config from manager_state.json")
+    parser.add_argument(
+        "--adaptive-threshold",
+        action="store_true",
+        help="Enable adaptive threshold escalation: after each loss, require a higher signal "
+             "quality before re-entering.  Resets on a win.  Mimics human caution.",
+    )
     args = parser.parse_args()
 
     # Logging
@@ -1735,6 +1832,7 @@ def main():
         hotness_tracker=hotness_instance,
         vol_gate=vol_gate_instance,
         disable_hot_reload=args.disable_hot_reload,
+        adaptive_threshold=args.adaptive_threshold,
     )
 
     # Graceful shutdown on Ctrl+C

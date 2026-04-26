@@ -358,6 +358,103 @@ def run_benchmark(cfg: dict) -> None:
 
 
 # ─────────────────────────────────────────────────────────────────
+# Sprint entry gate — check market conditions before starting
+# ─────────────────────────────────────────────────────────────────
+def wait_for_tradable_market(
+    cfg: dict,
+    consecutive_losing_sprints: int,
+    max_wait_seconds: float = 300.0,
+) -> bool:
+    """Block until the market scanner reports acceptable tradability.
+
+    After consecutive losing sprints the required tradability rises so the
+    autopilot naturally pauses longer during bad market conditions.
+
+    Returns True when conditions are met, False if max_wait exceeded.
+    """
+    min_trad = int(cfg.get("min_tradability", 55))
+    min_symbols = int(cfg.get("min_tradable_symbols", 2))
+
+    # Raise the bar after consecutive losses
+    if consecutive_losing_sprints >= 3:
+        min_trad = max(min_trad, int(cfg.get("min_tradability_after_losses", 70)))
+    elif consecutive_losing_sprints >= 2:
+        min_trad = max(min_trad, min_trad + 5)
+
+    waited = 0.0
+    poll_interval = 30.0
+    while waited < max_wait_seconds:
+        scan = load_json(SCAN_FILE)
+        if scan and "results" in scan:
+            good = [
+                r for r in scan["results"]
+                if r.get("tradability", 0) >= min_trad
+            ]
+            if len(good) >= min_symbols:
+                if waited > 0:
+                    log.info(
+                        "Market gate passed after %.0fs: %d symbols ≥ %d tradability",
+                        waited, len(good), min_trad,
+                    )
+                return True
+            log.info(
+                "Market gate: only %d/%d symbols meet tradability ≥ %d — "
+                "waiting %.0fs (%.0fs left)",
+                len(good), min_symbols, min_trad,
+                poll_interval, max_wait_seconds - waited,
+            )
+        else:
+            log.info("Market gate: no scan data yet — waiting %.0fs", poll_interval)
+        time.sleep(poll_interval)
+        waited += poll_interval
+
+    log.warning(
+        "Market gate timeout (%.0fs). Proceeding with caution.", max_wait_seconds,
+    )
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────
+# Smart cooldown — adaptive pause between sprints
+# ─────────────────────────────────────────────────────────────────
+def smart_cooldown(
+    sprint_net: float,
+    max_loss_streak_in_sprint: int,
+    consecutive_losing_sprints: int,
+    cfg: dict,
+) -> float:
+    """Compute cooldown duration (seconds) based on sprint outcome.
+
+    Mimics a human trader who rests briefly after wins but steps back
+    longer after losses to let market conditions change.
+
+    Returns the number of seconds to sleep.
+    """
+    if sprint_net > 0:
+        # Win: short cooldown (60-90s)
+        base = random.uniform(50.0, 90.0)
+        log.info("Win — cooling down %.0fs before next sprint.", base)
+        return base
+
+    # Loss: scale cooldown with severity
+    # Base: 90s after a clean 1-trade loss, up to 5 min for nasty streaks
+    base_loss_cd = 90.0
+    streak_factor = min(max_loss_streak_in_sprint, 5) * 15.0  # +15s per streak level
+    consec_factor = min(consecutive_losing_sprints, 3) * 30.0  # +30s per losing sprint
+    cd = base_loss_cd + streak_factor + consec_factor
+    cd = min(cd, 300.0)  # cap at 5 minutes
+    cd += random.uniform(-10, 10)  # jitter
+    cd = max(30.0, cd)
+
+    log.info(
+        "Loss — cooling down %.0fs (streak=%d, consec_losses=%d) "
+        "to let market reset.",
+        cd, max_loss_streak_in_sprint, consecutive_losing_sprints,
+    )
+    return cd
+
+
+# ─────────────────────────────────────────────────────────────────
 # Main loop
 # ─────────────────────────────────────────────────────────────────
 def main() -> None:
@@ -373,6 +470,7 @@ def main() -> None:
     sprints: List[dict] = []
     last_algo: Optional[str] = None
     consecutive_count: int = 0
+    consecutive_losing_sprints: int = 0
 
     while True:
         cfg = load_json(CONFIG_FILE)
@@ -408,6 +506,21 @@ def main() -> None:
                 "sprints": sprints,
             })
             break
+
+        # ── Sprint entry gate ──
+        # Check market conditions before committing to a new sprint.
+        use_gate = bool(cfg.get("sprint_entry_gate", True))
+        if use_gate:
+            gate_wait = float(cfg.get("gate_max_wait_seconds", 300.0))
+            write_json(STATE_FILE, {
+                "cumulative_profit": cumulative_profit,
+                "max_daily_profit": max_daily,
+                "sprint_count": sprint_count,
+                "current_algo": "SCANNING",
+                "status": "Waiting for tradable market...",
+                "updated_at": time.time(),
+            })
+            wait_for_tradable_market(cfg, consecutive_losing_sprints, gate_wait)
 
         sprint_count += 1
         log.info("")
@@ -484,6 +597,10 @@ def main() -> None:
                 flag_msgs.append(f"--ml-filter (thr={ml_thr})")
             else:
                 flag_msgs.append("--ml-filter")
+        # Adaptive threshold: always enabled in autopilot mode
+        if cfg.get("adaptive_threshold", True):
+            cmd.append("--adaptive-threshold")
+            flag_msgs.append("--adaptive-threshold")
         if flag_msgs:
             log.info("Flags: " + " | ".join(flag_msgs))
 
@@ -616,16 +733,29 @@ def main() -> None:
             "updated_at": time.time(),
         })
 
+        # Track consecutive losing sprints for escalating cooldowns
+        if sprint_net > 0:
+            consecutive_losing_sprints = 0
+        else:
+            consecutive_losing_sprints += 1
+
         if cumulative_profit >= max_daily:
             continue
 
-        if sprint_net > 0:
-            cd = float(cfg.get("cooldown_win_minutes", 2.0))
-            log.info(f"Win — cooling down {cd:.1f} min before next sprint.")
+        # ── Smart adaptive cooldown ──
+        use_smart_cd = bool(cfg.get("smart_cooldown", True))
+        if use_smart_cd:
+            cd_secs = smart_cooldown(
+                sprint_net, max_loss_streak, consecutive_losing_sprints, cfg,
+            )
         else:
-            cd = float(cfg.get("cooldown_loss_minutes", 5.0))
-            log.info(f"Loss — cooling down {cd:.1f} min to let market reset.")
-        time.sleep(max(0.0, cd * 60.0))
+            if sprint_net > 0:
+                cd_secs = float(cfg.get("cooldown_win_minutes", 2.0)) * 60.0
+                log.info("Win — cooling down %.1f min.", cd_secs / 60.0)
+            else:
+                cd_secs = float(cfg.get("cooldown_loss_minutes", 5.0)) * 60.0
+                log.info("Loss — cooling down %.1f min.", cd_secs / 60.0)
+        time.sleep(max(0.0, cd_secs))
 
 
 if __name__ == "__main__":
