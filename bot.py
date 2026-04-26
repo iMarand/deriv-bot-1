@@ -132,22 +132,25 @@ class DerivBot:
         self.vol_gate = vol_gate
 
         # ── Adaptive threshold escalation ──────────────────────────────
-        # After each consecutive loss the bot demands a higher signal
-        # quality before re-entering — mimicking a human getting more
-        # cautious.  Resets on any win.  The bonus curve is exponential
-        # so it ramps up steeply: +0.07, +0.15, +0.24, +0.34, …
+        # After each consecutive loss the bot demands a slightly higher
+        # signal quality before re-entering — mimicking a human getting
+        # more cautious.  Resets on any win.
+        # Gentle lookup table — never so high that the bot freezes:
+        #   loss 0 → +0.00  |  loss 1 → +0.03  |  loss 2 → +0.06
+        #   loss 3 → +0.10  |  loss 4 → +0.13  |  loss 5+ → +0.15
         self._adaptive_threshold_enabled: bool = adaptive_threshold
-        self._adaptive_base_bonus: float = 0.07    # bonus after 1st loss
-        self._adaptive_escalation: float = 1.08    # exponential growth per loss
-        # Post-loss re-evaluation delay: after a loss, skip this many
-        # ticks before accepting new signals.  Lets fresh data arrive so
-        # the algorithm doesn't re-enter on the same stale pattern that
-        # just lost.  Scales with consecutive losses.
+        self._adaptive_bonus_table: list = [0.00, 0.03, 0.06, 0.10, 0.13, 0.15]
+        # Post-loss re-evaluation delay (ticks): lets fresh data arrive
+        # so the algorithm doesn't re-enter on the same stale pattern.
         self._post_loss_wait_ticks: int = 0
-        self._post_loss_base_delay: int = 8        # ticks after 1st loss
-        self._post_loss_delay_per_loss: int = 5     # extra ticks per additional loss
-        self._last_loss_symbol: Optional[str] = None  # track which symbol lost
-        self._last_loss_score: float = 0.0            # score that led to the loss
+        self._adaptive_delay_table: list = [0, 3, 5, 8, 12, 15]
+        self._last_loss_symbol: Optional[str] = None
+        self._last_loss_score: float = 0.0
+        # Idle escape valve: if no trade happens for this long (seconds),
+        # start decaying the adaptive bonus so the bot never permanently
+        # freezes within a sprint.
+        self._adaptive_idle_decay_seconds: float = 90.0
+        self._adaptive_idle_reset_seconds: float = 180.0
 
         # State
         self.equity: float = 0.0
@@ -256,23 +259,42 @@ class DerivBot:
         return (not self._regime_required()) or rd.current_regime != Regime.UNKNOWN
 
     def _adaptive_threshold_bonus(self) -> float:
-        """Exponential threshold escalation based on consecutive losses.
+        """Gentle threshold escalation based on consecutive losses.
 
-        Returns a bonus added to the base entry threshold.  The curve is:
-          loss 0 → 0.00   (trade at normal threshold)
-          loss 1 → 0.07   (slightly more cautious)
-          loss 2 → 0.15   (noticeably more cautious)
-          loss 3 → 0.24   (very cautious)
-          loss 4 → 0.34   (extremely selective)
-          loss 5+→ 0.45   (cap — beyond this almost nothing passes)
+        Uses a lookup table so the bonus is always reachable by strong
+        signals and never causes a permanent freeze:
+          loss 0 → +0.00  (normal)
+          loss 1 → +0.03  ("think a little more")
+          loss 2 → +0.06  ("think harder")
+          loss 3 → +0.10  ("be cautious")
+          loss 4 → +0.13  ("be selective")
+          loss 5+→ +0.15  (cap — effective threshold ~0.75, still achievable)
+
+        If no trade has happened for 90+ seconds, the bonus decays to
+        prevent the bot from getting stuck.
         """
         if not self._adaptive_threshold_enabled:
             return 0.0
         losses = self.martingale.consecutive_losses
         if losses == 0:
             return 0.0
-        raw = self._adaptive_base_bonus * (self._adaptive_escalation ** (losses - 1)) * losses
-        return min(raw, 0.45)  # cap so threshold never becomes unreachable
+
+        idx = min(losses, len(self._adaptive_bonus_table) - 1)
+        bonus = self._adaptive_bonus_table[idx]
+
+        # Idle decay: if we've been waiting too long, reduce the bonus
+        if self._last_trade_ts > 0:
+            idle = time.time() - self._last_trade_ts
+            if idle >= self._adaptive_idle_reset_seconds:
+                return 0.0  # full reset — let the bot trade again
+            if idle >= self._adaptive_idle_decay_seconds:
+                # Linear decay from full bonus to 0 between 90s and 180s
+                decay_pct = (idle - self._adaptive_idle_decay_seconds) / (
+                    self._adaptive_idle_reset_seconds - self._adaptive_idle_decay_seconds
+                )
+                bonus *= max(0.0, 1.0 - decay_pct)
+
+        return bonus
 
     def _direction_threshold(self, signal: SignalSnapshot) -> float:
         threshold = self.cfg.ensemble.entry_score_threshold
@@ -1216,14 +1238,13 @@ class DerivBot:
         self._write_app_json()
 
         # ── Adaptive threshold: post-loss re-evaluation delay ─────────
-        # After a loss, pause for extra ticks so the algorithm digests
+        # After a loss, pause for a few ticks so the algorithm digests
         # fresh data before deciding on the next entry.  On a win, reset.
         if is_win:
             if self._adaptive_threshold_enabled and self._last_loss_symbol is not None:
                 logger.info(
-                    "Adaptive threshold reset → base (was +%.2f after %d losses)",
+                    "Adaptive threshold reset → base (was +%.2f)",
                     self._adaptive_threshold_bonus(),
-                    0,  # already reset by martingale.on_result
                 )
             self._post_loss_wait_ticks = 0
             self._last_loss_symbol = None
@@ -1235,15 +1256,14 @@ class DerivBot:
                 self._current_signal.composite_score if self._current_signal else 0.0
             )
             if self._adaptive_threshold_enabled:
-                # Scale delay with consecutive losses: 8 + 5*(losses-1) ticks
-                self._post_loss_wait_ticks = (
-                    self._post_loss_base_delay
-                    + self._post_loss_delay_per_loss * max(0, losses - 1)
-                )
+                # Lookup delay from table: [0, 3, 5, 8, 12, 15]
+                idx = min(losses, len(self._adaptive_delay_table) - 1)
+                self._post_loss_wait_ticks = self._adaptive_delay_table[idx]
                 new_bonus = self._adaptive_threshold_bonus()
                 logger.info(
-                    "Adaptive threshold escalated → +%.2f (total=%.2f) | "
+                    "Adaptive: loss #%d → threshold +%.2f (total=%.2f) | "
                     "re-eval delay=%d ticks | lost on %s (score=%.3f)",
+                    losses,
                     new_bonus,
                     self.cfg.ensemble.entry_score_threshold + new_bonus,
                     self._post_loss_wait_ticks,
